@@ -9,18 +9,21 @@ import std_msgs.msg
 from ament_index_python.packages import get_package_share_directory
 from timing import timer
 
-from ros2_example_package.example_model import model
+import cv2
+import numpy as np
 
 
-class ROS2ExampleNode(rclpy.node.Node):
+class IntersectionDetector(rclpy.node.Node):
     """ROS2 Example Node."""
+
+    DBG_IMG_DIR = "/home/smartrollerz/Desktop/smartrollers/smarty_workspace/rosbag_images/rosbag2_2025_03_06-17_56_01"
 
     def __init__(self):
         """Initialize the ROS2ExampleNode."""
-        super().__init__("ros2_example_node")
+        super().__init__("crossing_detection_node")
 
         # Get the package path
-        self.package_share_path = get_package_share_directory("ros2_example_package")
+        self.package_share_path = get_package_share_directory("crossing_detection")
         self.get_logger().info(f"Package Path: {self.package_share_path}")
 
         # Load the parameters from the ROS parameter server and initialize
@@ -31,11 +34,11 @@ class ROS2ExampleNode(rclpy.node.Node):
         # Create required objects
         self.cv_bridge = cv_bridge.CvBridge()
 
-        self.model = model.ExampleModel(
-            root=self.package_share_path, model_config_path=self.model_config_path
-        )
+        # self.model = model.ExampleModel(
+        #    root=self.package_share_path, model_config_path=self.model_config_path
+        # )
 
-        self.get_logger().info("ROS2ExampleNode initialized")
+        self.get_logger().info("Crossing Detector initialized.")
 
     def load_ros_params(self):
         """Gets the parameters from the ROS parameter server."""
@@ -46,11 +49,9 @@ class ROS2ExampleNode(rclpy.node.Node):
             parameters=[
                 ("debug", False),
                 ("image_path", "resources/img/example.png"),
-                ("model_config_path", "config/model.yaml"),
                 ("image_topic", "/camera/undistorted"),
                 ("result_topic", "/example/result"),
                 ("debug_image_topic", "/example/debug_image"),
-                ("example_value", 500),
             ],
         )
 
@@ -60,11 +61,9 @@ class ROS2ExampleNode(rclpy.node.Node):
             self.package_share_path,
             self.get_parameter("image_path").value,
         )  # full path to the image
-        self.model_config_path = self.get_parameter("model_config_path").value
         self.image_topic = self.get_parameter("image_topic").value
         self.result_topic = self.get_parameter("result_topic").value
         self.debug_image_topic = self.get_parameter("debug_image_topic").value
-        self.example_value = self.get_parameter("example_value").value
 
     def init_publisher_and_subscriber(self):
         """Initializes the subscribers and publishers."""
@@ -132,6 +131,47 @@ class ROS2ExampleNode(rclpy.node.Node):
 
         timer.Timer(logger=self.get_logger().info).print()
 
+    @staticmethod
+    def load_img_grayscale(img_path: str) -> np.ndarray:
+        img = cv2.imread(img_path)
+        # gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return img
+
+    @staticmethod
+    def show_image(img, title: str = "Graphic"):
+        cv2.imshow(title, img)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    def perform_canny(self, img):
+        img = cv2.GaussianBlur(img, (5, 5), 0)
+        img = cv2.Canny(img, 100, 100)
+        # IntersectionDetector.show_image("Canny", img)
+        return img
+
+    def hough_transformation(self, img, img_edges):
+        img2 = img[::]
+        transformed = []
+        # lines = cv2.HoughLines(img_edges,1,np.pi/180,200,min_theta)
+        lines = cv2.HoughLinesP(
+            img_edges, 1, np.pi / 180, 30, minLineLength=10, maxLineGap=10
+        )
+        i = True
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            cv2.line(img2, (x1, y1), (x2, y2), (255, 0, 0) if i else (0, 50, 255), 2)
+            i = False
+            transformed.append(((x1, y1), (x2, y2)))
+        # cv2.imwrite("houghlines.jpg", img2)
+        IntersectionDetector.show_image("Hough Lines", img2)
+        return transformed
+
+    def pipeline(self, img_path: str):
+        image = IntersectionDetector.load_img_grayscale(img_path)
+        edges = self.perform_canny(image)
+        transformed_lines = self.hough_transformation(image, edges)
+        print(transformed_lines[0])
+
 
 def main(args=None):
     """
@@ -141,7 +181,7 @@ def main(args=None):
         args -- Launch arguments (default: {None})
     """
     rclpy.init(args=args)
-    node = ROS2ExampleNode()
+    node = IntersectionDetector()
 
     # We have 2 options on how to run the node:
     # 1. Let the node idle in the background with 'rclpy.spin(node)' if we want to let
@@ -158,7 +198,9 @@ def main(args=None):
         use_wait_for_message = True
         if use_wait_for_message:
             while rclpy.ok():
-                node.wait_for_message_and_execute()
+                # node.wait_for_message_and_execute()
+                for img in os.listdir(IntersectionDetector.DBG_IMG_DIR):
+                    node.pipeline(os.path.join(IntersectionDetector.DBG_IMG_DIR, img))
                 rclpy.spin_once(node)
         else:
             rclpy.spin(node)

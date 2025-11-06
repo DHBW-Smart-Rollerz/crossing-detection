@@ -3,7 +3,7 @@ import os
 from setup_utils import include_directory
 from setuptools import find_packages, setup
 
-package_name = "ros2_example_package"
+package_name = "crossing_detection"
 
 setup(
     name=package_name,
@@ -25,12 +25,12 @@ setup(
     zip_safe=True,
     maintainer="Smart Rollerz",
     maintainer_email="info@dhbw-smartrollerz.org",
-    description="TODO: Package description",
+    description="TODO: package by inf23057",
     license="TODO: License declaration",
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            f"ros2_example_node = {package_name}.ros2_example_node:main",
+            f"crossing_detection_node = {package_name}.crossing_detection_node:main",
         ],
     },
 )
