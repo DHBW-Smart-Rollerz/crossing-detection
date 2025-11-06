@@ -1,6 +1,8 @@
 import os
 
+import cv2
 import cv_bridge
+import numpy as np
 import rclpy
 import rclpy.node
 import rclpy.wait_for_message
@@ -8,9 +10,6 @@ import sensor_msgs.msg
 import std_msgs.msg
 from ament_index_python.packages import get_package_share_directory
 from timing import timer
-
-import cv2
-import numpy as np
 
 
 class IntersectionDetector(rclpy.node.Node):
@@ -133,23 +132,60 @@ class IntersectionDetector(rclpy.node.Node):
 
     @staticmethod
     def load_img_grayscale(img_path: str) -> np.ndarray:
+        """
+        Load an image from a file and convert it to grayscale.
+
+        Arguments:
+            img_path -- Path to the image file.
+
+        Returns:
+            Grayscale image as a numpy ndarray.
+        """
         img = cv2.imread(img_path)
         # gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         return img
 
     @staticmethod
     def show_image(img, title: str = "Graphic"):
+        """
+        Show an image using OpenCV.
+
+        Arguments:
+            img -- Image to be displayed.
+
+        Keyword Arguments:
+            title -- (default: {"Graphic"})
+        """
         cv2.imshow(title, img)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
     def perform_canny(self, img):
+        """
+        Perform Canny edge detection on the image.
+
+        Arguments:
+            img -- Input image.
+
+        Returns:
+            Image with edges detected.
+        """
         img = cv2.GaussianBlur(img, (5, 5), 0)
         img = cv2.Canny(img, 100, 100)
         # IntersectionDetector.show_image("Canny", img)
         return img
 
     def hough_transformation(self, img, img_edges):
+        """
+        Perform Hough Transformation to detect lines in the image.
+
+        Arguments:
+            img -- Input image.
+            img_edges -- Image with edges detected.
+
+        Returns:
+            List of detected lines as pairs of points.
+        """
         img2 = img[::]
         transformed = []
         # lines = cv2.HoughLines(img_edges,1,np.pi/180,200,min_theta)
@@ -167,6 +203,12 @@ class IntersectionDetector(rclpy.node.Node):
         return transformed
 
     def pipeline(self, img_path: str):
+        """
+        Complete processing pipeline for intersection detection.
+
+        Arguments:
+            img_path -- Path to the input image.
+        """
         image = IntersectionDetector.load_img_grayscale(img_path)
         edges = self.perform_canny(image)
         transformed_lines = self.hough_transformation(image, edges)
@@ -195,6 +237,7 @@ def main(args=None):
     #   messages.
 
     try:
+        #
         use_wait_for_message = True
         if use_wait_for_message:
             while rclpy.ok():
