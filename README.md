@@ -10,7 +10,7 @@ This package implements an intersection detector working on grayscale Cv2 images
 To build the package run the following command.
 
 ```bash
-colcon build --symlink-install --packages-select my_package
+source smarty_workspace/scripts/build.sh
 ```
 To run the detector node, run:
 

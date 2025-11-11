@@ -1,95 +1,81 @@
+import math
 import os
 
 import cv2
 import cv_bridge
 import numpy as np
 import rclpy
-import rclpy.node
-import rclpy.wait_for_message
 import sensor_msgs.msg
 import std_msgs.msg
-from ament_index_python.packages import get_package_share_directory
+from smarty_utils.enums import NodeState
+from smarty_utils.smarty_node import SmartyNode
 from timing import timer
 
 
-class IntersectionDetector(rclpy.node.Node):
-    """ROS2 Example Node."""
+class IntersectionDetector(SmartyNode):
+    """
+    A ROS2 node for crossing detection.
+
+    Arguments:
+        SmartyNode -- Base class for ROS2 nodes.
+
+    Returns:
+        None
+    """
 
     DBG_IMG_DIR = "/home/smartrollerz/Desktop/smartrollers/smarty_workspace/rosbag_images/rosbag2_2025_03_06-17_56_01"
 
     def __init__(self):
         """Initialize the ROS2ExampleNode."""
-        super().__init__("crossing_detection_node")
-
-        # Get the package path
-        self.package_share_path = get_package_share_directory("crossing_detection")
-        self.get_logger().info(f"Package Path: {self.package_share_path}")
-
-        # Load the parameters from the ROS parameter server and initialize
-        # the publishers and subscribers
-        self.load_ros_params()
-        self.init_publisher_and_subscriber()
+        super().__init__(
+            "crossing_detection_node",
+            "crossing_detection",
+            node_parameters={
+                # Subscriber topics
+                "image_subscriber": "/camera/image/undistorted",
+                # Publisher topics
+                "debug_image_publisher": "/example/debug_image",
+                "result_publisher": "/example/result",
+                # Parameters
+                "state": NodeState.ACTIVE.value,
+                "image_path": "resources/img/example.png",
+                "example_value": 128,
+                "debug": False,
+            },
+            subscribed_topics={
+                "image_subscriber": (
+                    sensor_msgs.msg.Image,
+                    self.image_callback,
+                    1,
+                ),
+            },
+            published_topics={
+                "debug_image_publisher": (sensor_msgs.msg.Image, 1),
+                "result_publisher": (std_msgs.msg.Float32, 1),
+            },
+        )
+        self.get_logger().info(f"Package Path: {self.package_path}")
 
         # Create required objects
         self.cv_bridge = cv_bridge.CvBridge()
 
-        # self.model = model.ExampleModel(
-        #    root=self.package_share_path, model_config_path=self.model_config_path
-        # )
-
         self.get_logger().info("Crossing Detector initialized.")
 
-    def load_ros_params(self):
-        """Gets the parameters from the ROS parameter server."""
-        # All command line arguments from the launch file and parameters from the
-        # yaml config file must be declared here with a default value.
-        self.declare_parameters(
-            namespace="",
-            parameters=[
-                ("debug", False),
-                ("image_path", "resources/img/example.png"),
-                ("image_topic", "/camera/undistorted"),
-                ("result_topic", "/example/result"),
-                ("debug_image_topic", "/example/debug_image"),
-            ],
-        )
+    @property
+    def image_path(self) -> str:
+        """Get the image path parameter."""
+        return os.path.join(
+            self.package_path,
+            self.get_parameter("image_path").value,  # type: ignore
+        )  # type: ignore # full path to the image
 
-        # Get parameters from the ROS parameter server into a local variable
-        self.debug = self.get_parameter("debug").value
-        self.image_path = os.path.join(
-            self.package_share_path,
-            self.get_parameter("image_path").value,
-        )  # full path to the image
-        self.image_topic = self.get_parameter("image_topic").value
-        self.result_topic = self.get_parameter("result_topic").value
-        self.debug_image_topic = self.get_parameter("debug_image_topic").value
-
-    def init_publisher_and_subscriber(self):
-        """Initializes the subscribers and publishers."""
-        self.image_subscriber = self.create_subscription(
-            sensor_msgs.msg.Image, self.image_topic, self.image_callback, 1
-        )
-        self.result_publisher = self.create_publisher(
-            std_msgs.msg.Float32, self.result_topic, 1
-        )
-
-        if self.debug:
-            self.debug_image_publisher = self.create_publisher(
-                sensor_msgs.msg.Image, self.debug_image_topic, 1
-            )
+    @property
+    def example_value(self) -> int:
+        """Get the example value parameter."""
+        return self.get_parameter("example_value").value  # type: ignore
 
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
-        # Execute the prediction
-        self.execute_prediction(msg)
-
-    def wait_for_message_and_execute(self):
-        """Waits for a new message on the image topic and then executes the prediction."""
-        # Wait for a new message on the image topic
-        _, msg = rclpy.wait_for_message.wait_for_message(
-            sensor_msgs.msg.Image, self, self.image_topic
-        )
-
         # Execute the prediction
         self.execute_prediction(msg)
 
@@ -105,30 +91,28 @@ class IntersectionDetector(rclpy.node.Node):
             # The image has to be retrieved from the message
             image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="8UC1")
 
-        with timer.Timer(name="prediction", filter_strength=40):
-            # Get the result from the model
-            result = self.model.predict(image)
+        res = "Example Result"
 
         with timer.Timer(name="publish", filter_strength=40):
             # Publish the result as the custom ROS2 message defined in this package
-            self.result_publisher.publish(
+            self.result_publisher.publish(  # type: ignore
                 std_msgs.msg.Float32(
-                    data=result,
+                    data=res,
                 )
             )
 
-        if self.debug:
+        if self._debug:
             with timer.Timer(name="debug", filter_strength=40):
                 # Create the debug image. Here it is just the image filled with
                 # the example value.
                 debug_image = image.copy()
                 debug_image.fill(self.example_value)
 
-                self.debug_image_publisher.publish(
+                self.debug_image_publisher.publish(  # type: ignore
                     self.cv_bridge.cv2_to_imgmsg(image, encoding="8UC1")
                 )
 
-        timer.Timer(logger=self.get_logger().info).print()
+        timer.Timer(logger=self.get_logger().info).print()  # type: ignore
 
     @staticmethod
     def load_img_grayscale(img_path: str) -> np.ndarray:
@@ -175,6 +159,21 @@ class IntersectionDetector(rclpy.node.Node):
         # IntersectionDetector.show_image("Canny", img)
         return img
 
+    def _show_lines(self, img, lines):
+        """
+        Show lines on the image.
+
+        Arguments:
+            img -- Input image.
+            lines -- List of lines as pairs of points.
+        """
+        img2 = img[::]
+        for line in lines:
+            x1, y1 = line[0]
+            x2, y2 = line[1]
+            cv2.line(img2, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        IntersectionDetector.show_image(img2, "lines")
+
     def hough_transformation(self, img, img_edges):
         """
         Perform Hough Transformation to detect lines in the image.
@@ -199,8 +198,37 @@ class IntersectionDetector(rclpy.node.Node):
             i = False
             transformed.append(((x1, y1), (x2, y2)))
         # cv2.imwrite("houghlines.jpg", img2)
-        IntersectionDetector.show_image("Hough Lines", img2)
+        IntersectionDetector.show_image(img2, "houghlines")
         return transformed
+
+    def filter_by_angle(self, hough_lines):
+        """
+        Filter lines based on their angle.
+
+        Arguments:
+            hough_lines -- List of lines as pairs of points.
+
+        Returns:
+            Filtered list of lines.
+        """
+        res = []
+        for line in hough_lines:
+            (x1, y1), (x2, y2) = line
+            delta_x = x2 - x1
+            delta_y = y2 - y1
+
+            angle_rad = math.atan2(delta_y, delta_x)
+            angle_deg = abs(math.degrees(angle_rad))
+
+            angle_deg = angle_deg % 180.0
+
+            if (
+                min(abs(angle_deg - 0.0), abs(angle_deg - 180.0)) <= 15.0
+                or abs(angle_deg - 90.0) <= 15.0
+            ):
+                res.append(line)
+
+        return res
 
     def pipeline(self, img_path: str):
         """
@@ -212,6 +240,9 @@ class IntersectionDetector(rclpy.node.Node):
         image = IntersectionDetector.load_img_grayscale(img_path)
         edges = self.perform_canny(image)
         transformed_lines = self.hough_transformation(image, edges)
+        filtered_lines = self.filter_by_angle(transformed_lines)
+        self._show_lines(image, filtered_lines)
+        print("Filtered Lines:", len(filtered_lines))
         print(transformed_lines[0])
 
 
