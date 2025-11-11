@@ -185,7 +185,7 @@ class IntersectionDetector(SmartyNode):
             delta_y = line[1][1] - line[0][1]
             delta_x = line[1][0] - line[0][0]
             slope = delta_y / delta_x
-            angle = math.tan(slope)
+            angle = math.atan(slope)
 
             print(angle)
 
