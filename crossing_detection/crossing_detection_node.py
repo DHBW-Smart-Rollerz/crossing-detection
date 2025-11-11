@@ -1,9 +1,9 @@
+import math
 import os
 
 import cv2
 import cv_bridge
 import numpy as np
-import math
 import rclpy
 import sensor_msgs.msg
 import std_msgs.msg
@@ -13,7 +13,15 @@ from timing import timer
 
 
 class IntersectionDetector(SmartyNode):
-    """ROS2 Example Node."""
+    """
+    A ROS2 node for crossing detection.
+
+    Arguments:
+        SmartyNode -- Base class for ROS2 nodes.
+
+    Returns:
+        None
+    """
 
     DBG_IMG_DIR = "/home/smartrollerz/Desktop/smartrollers/smarty_workspace/rosbag_images/rosbag2_2025_03_06-17_56_01"
 
@@ -151,6 +159,21 @@ class IntersectionDetector(SmartyNode):
         # IntersectionDetector.show_image("Canny", img)
         return img
 
+    def _show_lines(self, img, lines):
+        """
+        Show lines on the image.
+
+        Arguments:
+            img -- Input image.
+            lines -- List of lines as pairs of points.
+        """
+        img2 = img[::]
+        for line in lines:
+            x1, y1 = line[0]
+            x2, y2 = line[1]
+            cv2.line(img2, (x1, y1), (x2, y2), (255, 0, 0), 2)
+        IntersectionDetector.show_image(img2, "lines")
+
     def hough_transformation(self, img, img_edges):
         """
         Perform Hough Transformation to detect lines in the image.
@@ -175,21 +198,34 @@ class IntersectionDetector(SmartyNode):
             i = False
             transformed.append(((x1, y1), (x2, y2)))
         # cv2.imwrite("houghlines.jpg", img2)
-        IntersectionDetector.show_image("Hough Lines", img2)
+        IntersectionDetector.show_image(img2, "houghlines")
         return transformed
 
-    def filter_by_angle(hough_lines):
-        # add docstring
+    def filter_by_angle(self, hough_lines):
+        """
+        Filter lines based on their angle.
+
+        Arguments:
+            hough_lines -- List of lines as pairs of points.
+
+        Returns:
+            Filtered list of lines.
+        """
         res = []
         for line in hough_lines:
-            delta_y = line[1][1] - line[0][1]
-            delta_x = line[1][0] - line[0][0]
-            slope = delta_y / delta_x
-            angle = math.atan(slope)
+            (x1, y1), (x2, y2) = line
+            delta_x = x2 - x1
+            delta_y = y2 - y1
 
-            print(angle)
+            angle_rad = math.atan2(delta_y, delta_x)
+            angle_deg = abs(math.degrees(angle_rad))
 
-            if abs(angle) <= 15:
+            angle_deg = angle_deg % 180.0
+
+            if (
+                min(abs(angle_deg - 0.0), abs(angle_deg - 180.0)) <= 15.0
+                or abs(angle_deg - 90.0) <= 15.0
+            ):
                 res.append(line)
 
         return res
@@ -204,6 +240,9 @@ class IntersectionDetector(SmartyNode):
         image = IntersectionDetector.load_img_grayscale(img_path)
         edges = self.perform_canny(image)
         transformed_lines = self.hough_transformation(image, edges)
+        filtered_lines = self.filter_by_angle(transformed_lines)
+        self._show_lines(image, filtered_lines)
+        print("Filtered Lines:", len(filtered_lines))
         print(transformed_lines[0])
 
 
