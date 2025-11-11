@@ -3,6 +3,7 @@ import os
 import cv2
 import cv_bridge
 import numpy as np
+import math
 import rclpy
 import sensor_msgs.msg
 import std_msgs.msg
@@ -176,6 +177,22 @@ class IntersectionDetector(SmartyNode):
         # cv2.imwrite("houghlines.jpg", img2)
         IntersectionDetector.show_image("Hough Lines", img2)
         return transformed
+
+    def filter_by_angle(hough_lines):
+        # add docstring
+        res = []
+        for line in hough_lines:
+            delta_y = line[1][1] - line[0][1]
+            delta_x = line[1][0] - line[0][0]
+            slope = delta_y / delta_x
+            angle = math.tan(slope)
+
+            print(angle)
+
+            if abs(angle) <= 15:
+                res.append(line)
+
+        return res
 
     def pipeline(self, img_path: str):
         """
