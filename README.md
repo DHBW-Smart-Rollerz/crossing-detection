@@ -1,27 +1,23 @@
-# ROS2 Example Package
+# Crossing Detection Package
 
 [![Build Test](https://github.com/DHBW-Smart-Rollerz/ros2_example_package/actions/workflows/build-test.yaml/badge.svg)](https://github.com/DHBW-Smart-Rollerz/ros2_example_package/actions/workflows/build-test.yaml)
 
-This repository contains an example package for ros2 (python).
 
 ## Usage
 
-This repository can be used as template. Simply select this repo when creating a new repository under template.
+This package implements an intersection detector working on grayscale Cv2 images.
 
-Alternatively, you can create python ros packages with:
+To build the package run the following command.
 
 ```bash
-# If not already created
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-
-# Create package
-ros2 pkg create my_package --build-type ament_python --dependencies rclpy
-
-# Build
-cd ~/ros2_ws/src
-colcon build --symlink-install --packages-select my_package
+source smarty_workspace/scripts/build.sh
 ```
+To run the detector node, run:
+
+```bash
+ros2 run crossing_detection crossing_detection_node
+```
+
 
 ## Structure
 
@@ -29,7 +25,7 @@ colcon build --symlink-install --packages-select my_package
 - `launch/`: Contains all launch files. Launch files can start multiple nodes with yaml-configurations
 - `models/`: Contains all models (optional) and only necessary for machine learning nodes
 - `resource/`: Contains the package name (required to build with colcon)
-- `ros2_example_package`: Contains all nodes and sources for the ros package
+- `crossing_detection`: Contains all nodes and sources for the ros package
 - `test/`: Contains all tests
 - `package.xml`: Contains metadata about the package
 - `setup.py`: Used for Python package configuration
@@ -51,3 +47,7 @@ We appreciate your contributions and look forward to reviewing them!
 ## License
 
 This repository is licensed under the MIT license. See [LICENSE](LICENSE) for details.
+
+## Author
+
+Reinhold Brant (reinhold.bra5@gmail.com) for SmartRollerz.
