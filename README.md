@@ -14,9 +14,32 @@ source smarty_workspace/scripts/build.sh
 ```
 To run the detector node, run:
 
+Calibrate cam:
+```bash
+ros2 run camera_preprocessing camera_calibration_node --ros-args -p chessboard_path:='/home/smartrollerz/Downloads/chessboard_crossing.png'
+
+ros2 run camera_preprocessing camera_calibration_node --ros-args -p chessboard_path:='/home/smartrollerz/Downloads/chessboard_crossing.png' -p calibration_images_path:='/home/smartrollerz/Desktop/smartrollers/smarty_workspace/src/camera_preprocessing/img/calib/new_lens'
+
+```
+
+Run the preprocessing node:
+```bash
+ros2 run camera_preprocessing camera_preprocessing_node --remap /camera/image_raw:=/camera/image/raw
+```
+
+Run the bag:
+```bash
+ros2 bag play /home/smartrollerz/Downloads/crossing/rosbag2_2025_11_11-17_04_16_0.mcap
+ros2 bag play /path/to/bag
+```
+
+Run the crossing node:
 ```bash
 ros2 run crossing_detection crossing_detection_node
 ```
+
+Die crossing detection braucht "scikit-learn". Also `pip install scikit-learn`.
+
 
 
 ## Structure
