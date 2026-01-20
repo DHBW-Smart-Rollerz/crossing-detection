@@ -31,7 +31,8 @@ TURQUOISE = (255, 255, 100)
 GOLD = (0, 215, 255)
 
 RESULT_DIR_NAME = f"crossing_results/{time.strftime('%Y%m%d-%H%M%S')}"
-FILTERING_ROI_REL_RLTB = (0.80, 0, 0.12, 0.45)  # left, right, top, bottom
+# FILTERING_ROI_REL_RLTB = (0.80, 0, 0.12, 0.45)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.7)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -57,7 +58,7 @@ class IntersectionDetector(SmartyNode):
             "crossing_detection",
             node_parameters={
                 # Subscriber topics
-                "image_subscriber": "/camera/undistorted",
+                "image_subscriber": "/camera/birds_eye",
                 # Publisher topics
                 "debug_image_publisher": "/example/birdseye_view",
                 "result_publisher": "/example/result",
@@ -66,6 +67,7 @@ class IntersectionDetector(SmartyNode):
                 "image_path": "resources/img/example.png",
                 "example_value": 128,
                 "debug": False,
+                "compute_crossing_center": False,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -79,12 +81,17 @@ class IntersectionDetector(SmartyNode):
                 "result_publisher": (std_msgs.msg.Float32, 1),
             },
         )
-        self.get_logger().info(f"Package Path: {self.package_path}")
 
         # Create required objects
         self.cv_bridge = cv_bridge.CvBridge()
-
-        self.get_logger().info("Crossing Detector initialized.")
+        # read parameter into attribute for fast access
+        try:
+            self.compute_crossing_center = self.get_parameter(
+                "compute_crossing_center"
+            ).value
+        except Exception:
+            # fallback default
+            self.compute_crossing_center = True
 
     @property
     def image_path(self) -> str:
@@ -211,6 +218,74 @@ class IntersectionDetector(SmartyNode):
         # IntersectionDetector.show_image("Canny", img)
         return img
 
+    def _blur_roi_top(
+        self, image, ksize=(15, 15), sigmaX=0, do_close=True, close_kernel=(20, 3)
+    ):
+        """
+        Apply a Gaussian blur to the upper half of the configured ROI.
+
+        This helps the LSD detect distorted bird's-eye parts by smoothing
+        high-frequency noise in the top ROI area while preserving the rest
+        of the image.
+
+        Arguments:
+            image -- BGR image (numpy array)
+            ksize -- Gaussian kernel size (must be odd numbers)
+            sigmaX -- Gaussian sigma in X direction
+
+        Returns:
+            A copy of the image with the ROI top half blurred.
+        """
+        if image is None:
+            return image
+
+        h, w = image.shape[:2]
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+
+        # clamp coords
+        roi_left = max(0, min(w - 1, int(roi_left)))
+        roi_right = max(0, min(w, int(roi_right)))
+        roi_top = max(0, min(h - 1, int(roi_top)))
+        roi_bottom = max(0, min(h, int(roi_bottom)))
+
+        # top half of ROI
+        # top_half_end = roi_top + (roi_bottom - roi_top) // 2
+        top_half_end = roi_top + roi_bottom
+
+        # ensure valid box
+        top = max(0, roi_top)
+        bottom = max(top, min(h, top_half_end))
+        left = max(0, roi_left)
+        right = max(0, min(w, roi_right))
+
+        out = image.copy()
+        if bottom > top and right > left:
+            patch = out[top:bottom, left:right]
+            # ensure odd kernel sizes for Gaussian
+            kx, ky = ksize
+            if kx % 2 == 0:
+                kx += 1
+            if ky % 2 == 0:
+                ky += 1
+            blurred = cv2.GaussianBlur(patch, (kx, ky), sigmaX)
+
+            # optionally perform morphological closing to close small horizontal gaps
+            if do_close:
+                try:
+                    ckx, cky = int(close_kernel[0]), int(close_kernel[1])
+                except Exception:
+                    ckx, cky = 20, 3
+                # ensure kernel dimensions >=1
+                ckx = max(1, ckx)
+                cky = max(1, cky)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ckx, cky))
+                processed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+                out[top:bottom, left:right] = processed
+            else:
+                out[top:bottom, left:right] = blurred
+
+        return out
+
     def get_roi_bbox(self, img_shape):
         """
         Get the bounding box of the region of interest (ROI) based on relative coordinates.
@@ -240,9 +315,15 @@ class IntersectionDetector(SmartyNode):
             lines -- List of lines as pairs of points.
         """
         img2 = img[::]
+        # be explicit when checking collections: lines may be a numpy array
+        if lines is None or (hasattr(lines, "__len__") and len(lines) == 0):
+            return img2
         for line in lines:
-            x1, y1, x2, y2 = line[0]
-            # x2, y2 = line[1]
+            # normalize different possible representations
+            nl = self._normalize_line(line)
+            if nl is None:
+                continue
+            x1, y1, x2, y2 = nl[0]
             cv2.line(img2, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness)
 
         return img2
@@ -308,22 +389,11 @@ class IntersectionDetector(SmartyNode):
             dist_h = min(abs(angle_norm - 0.0), abs(angle_norm - 180.0))
             dist_v = min(abs(angle_norm - 80.0), abs(angle_norm - 100.0))
 
-            if debug:
-                self.get_logger().info(
-                    f"line[{idx}] ({x1:.1f},{y1:.1f})-({x2:.1f},{y2:.1f}) "
-                    f"angle={angle:.1f} angle_norm={angle_norm:.1f} dist_h={dist_h:.1f} dist_v={dist_v:.1f}"
-                )
-
             # classify by the nearer of the two, but require within tolerance
             if dist_v <= tol_deg + 10 and dist_v < dist_h:
                 vertical.append(line)
             elif dist_h <= tol_deg and dist_h < dist_v:
                 horizontal.append(line)
-
-        if debug:
-            self.get_logger().info(
-                f"filter_by_angle -> vertical: {len(vertical)} horizontal: {len(horizontal)}"
-            )
 
         return vertical, horizontal
 
@@ -469,7 +539,6 @@ class IntersectionDetector(SmartyNode):
             List of detected lines as pairs of points.
         """
         lines = lsd.detect(img)[0]
-        print(lines[0])
 
         return lines
 
@@ -596,6 +665,50 @@ class IntersectionDetector(SmartyNode):
                 nearest_line = line
 
         return nearest_line
+
+    def _normalize_line(self, line):
+        """
+        Normalize a single line representation into a numpy array of.
+        shape (1, 4). Accepts formats: ndarray (1,4) or (4,), nested
+        lists [[x1,y1,x2,y2]] or tuples. Returns None for malformed
+        entries.
+        """
+        if line is None:
+            return None
+        # numpy array
+        if isinstance(line, np.ndarray):
+            arr = line.squeeze()
+            if arr.ndim == 1 and arr.size >= 4:
+                return arr.reshape(1, -1)[:, :4].astype(np.float32)
+            if arr.ndim == 2 and arr.shape[1] >= 4:
+                return arr.reshape(1, -1)[:, :4].astype(np.float32)
+            return None
+
+        # list/tuple
+        if isinstance(line, (list, tuple)):
+            s = line
+            # flatten nested one-element lists e.g. [[x1,y1,x2,y2]]
+            while len(s) == 1 and isinstance(s[0], (list, tuple, np.ndarray)):
+                s = s[0]
+            try:
+                flat = np.array(s).reshape(-1)
+                if flat.size >= 4:
+                    return flat[:4].astype(np.float32).reshape(1, 4)
+            except Exception:
+                return None
+
+        return None
+
+    def _normalize_lines(self, lines):
+        """Normalize an iterable of lines to a list of numpy (1,4) arrays."""
+        if lines is None or (hasattr(lines, "__len__") and len(lines) == 0):
+            return []
+        normalized = []
+        for ln in lines:
+            nl = self._normalize_line(ln)
+            if nl is not None:
+                normalized.append(nl)
+        return normalized
 
     def elongate_line(self, line, length: float = 300):
         """
@@ -848,10 +961,17 @@ class IntersectionDetector(SmartyNode):
             img_path -- Path to the input image.
         """
         # image = IntersectionDetector.load_img_grayscale(img_path)
-        print(image.shape)
         # image = self.crop_image(image)
+
+        # blur + optional closing on the upper half of the ROI to help LSD
+        # detect distorted bird's-eye parts
+        image = self._blur_roi_top(
+            image, ksize=(20, 20), sigmaX=0, do_close=True, close_kernel=(25, 3)
+        )
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
+        # normalize detected lines to canonical numpy (1,4) arrays
+        transformed_lines = self._normalize_lines(transformed_lines)
         image = self._draw_lines(image, transformed_lines, color=MAGENTA)
         filtered_lines = self.filter_by_length(transformed_lines, min_length=20)
         # image = self._draw_lines(image, filtered_lines, color=BLUE)
@@ -861,16 +981,25 @@ class IntersectionDetector(SmartyNode):
 
         vert, horiz = self.filter_by_angle(filtered_lines)
 
-        try:
-            intersections = self.find_intersections(vert, horiz)
-        except Exception as e:
-            self.get_logger().error(f"find_intersections error: {e}")
-            intersections = []
-        try:
-            crossing_center = self.find_crossing_center(intersections)
-        except Exception as e:
-            self.get_logger().error(f"find_crossing_center error: {e}")
-            crossing_center = None
+        # compute crossing center optionally; if disabled, use ROI center
+        if getattr(self, "compute_crossing_center", True):
+            try:
+                intersections = self.find_intersections(vert, horiz)
+            except Exception as e:
+                self.get_logger().error(f"find_intersections error: {e}")
+                intersections = []
+            try:
+                crossing_center = self.find_crossing_center(intersections)
+            except Exception as e:
+                self.get_logger().error(f"find_crossing_center error: {e}")
+                crossing_center = None
+        else:
+            # use ROI center as crossing center when computation is disabled
+            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+            crossing_center = (
+                int((roi_left + roi_right) / 2),
+                int((roi_top + roi_bottom) / 2),
+            )
 
         if crossing_center is not None:
             image = cv2.circle(image, crossing_center, 8, YELLOW)
@@ -886,40 +1015,50 @@ class IntersectionDetector(SmartyNode):
 
         vert, horiz = self.filter_by_angle(lines)
 
-        ego_line = self.find_ego_line(horiz, crossing_center)
-        opp_line = self.find_opp_line(horiz, crossing_center)
+        image = self._draw_lines(image, vert, color=RED)
 
-        ego_line = self.elongate_line(ego_line)
-        opp_line = self.elongate_line(opp_line)
+        # Only attempt to find ego/opp lines if we have a valid crossing center.
+        if crossing_center is not None:
+            ego_line = self.find_ego_line(horiz, crossing_center)
+            opp_line = self.find_opp_line(horiz, crossing_center)
 
-        pair_plausible = False
-        if ego_line is not None and opp_line is not None:
-            pair_plausible = self.check_plausibility_horizontal_line_pair(
-                opp_line, ego_line, crossing_center
-            )
-            self.get_logger().info(f"Horizontal line pair plausible: {pair_plausible}")
-
-        try:
             if ego_line is not None:
-                image = self._draw_lines(
-                    image,
-                    [ego_line],
-                    color=GREEN if pair_plausible else RED,
-                    thickness=6,
-                )
-        except Exception as e:
-            self.get_logger().error(f"find_ego_line error: {e}")
-
-        try:
+                ego_line = self.elongate_line(ego_line)
             if opp_line is not None:
-                image = self._draw_lines(
-                    image,
-                    [opp_line],
-                    color=BLUE if pair_plausible else RED,
-                    thickness=6,
+                opp_line = self.elongate_line(opp_line)
+
+            pair_plausible = False
+            if ego_line is not None and opp_line is not None:
+                pair_plausible = self.check_plausibility_horizontal_line_pair(
+                    opp_line, ego_line, crossing_center
                 )
-        except Exception as e:
-            self.get_logger().error(f"find_opp_line error: {e}")
+
+            try:
+                if ego_line is not None:
+                    image = self._draw_lines(
+                        image,
+                        [ego_line],
+                        color=GREEN if pair_plausible else RED,
+                        thickness=6,
+                    )
+            except Exception as e:
+                self.get_logger().error(f"find_ego_line error: {e}")
+
+            try:
+                if opp_line is not None:
+                    image = self._draw_lines(
+                        image,
+                        [opp_line],
+                        color=BLUE if pair_plausible else RED,
+                        thickness=6,
+                    )
+            except Exception as e:
+                self.get_logger().error(f"find_opp_line error: {e}")
+        else:
+            # no crossing center found for this frame; skip ego/opp identification
+            self.get_logger().debug(
+                "pipeline: skipping ego/opp line search, no crossing center"
+            )
 
         """
          nearest_line = self.get_nearest_line(horiz)
