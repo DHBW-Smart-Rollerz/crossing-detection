@@ -429,7 +429,7 @@ class IntersectionDetector(SmartyNode):
 
         return res
 
-    def filter_by_length(self, lines, min_length: float = 70.0):
+    def filter_by_length(self, lines, min_length: float = 70.0, max_length=10000):
         """
         Filter lines based on their length.
 
@@ -444,7 +444,7 @@ class IntersectionDetector(SmartyNode):
         for line in lines:
             x1, y1, x2, y2 = line[0]
             length = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            if length >= min_length:
+            if length >= min_length and length <= max_length:
                 res.append(line)
 
         return res
@@ -710,7 +710,183 @@ class IntersectionDetector(SmartyNode):
                 normalized.append(nl)
         return normalized
 
-    def elongate_line(self, line, length: float = 300):
+    def fuse_similar_lines(
+        self,
+        lines,
+        angle_tol_deg: float = 10.0,
+        center_dist_tol: float = 30.0,
+        require_min_lines: int = 1,
+    ):
+        """
+        Merge lines that are nearly parallel and close to each other into.
+        single representative segments.
+
+        Algorithm (greedy clustering):
+        - Normalize lines to numpy (1,4).
+        - Compute each line's angle and center.
+        - Group lines whose angle difference <= angle_tol_deg and whose
+          center-to-center distance <= center_dist_tol.
+        - For each group, collect all endpoints, run PCA to get the main
+          axis, project endpoints on that axis and take the extreme
+          projected points as the fused segment endpoints.
+
+        Returns a list of numpy arrays, each shape (1,4) (float32).
+        """
+        normalized = self._normalize_lines(lines)
+        if not normalized:
+            return []
+
+        n = len(normalized)
+        angles = np.zeros(n, dtype=np.float32)
+        centers = np.zeros((n, 2), dtype=np.float32)
+        for i, ln in enumerate(normalized):
+            x1, y1, x2, y2 = ln[0]
+            dx = x2 - x1
+            dy = y2 - y1
+            angles[i] = (math.degrees(math.atan2(dy, dx)) + 360.0) % 180.0
+            centers[i] = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+        visited = [False] * n
+        fused = []
+
+        for i in range(n):
+            if visited[i]:
+                continue
+            # start new group
+            group_idx = [i]
+            visited[i] = True
+            for j in range(i + 1, n):
+                if visited[j]:
+                    continue
+                # angle difference (circular around 180)
+                diff = abs(angles[i] - angles[j])
+                diff = min(diff, 180.0 - diff)
+                if diff <= angle_tol_deg:
+                    # center distance
+                    d = float(np.hypot(*(centers[i] - centers[j])))
+                    if d <= center_dist_tol:
+                        group_idx.append(j)
+                        visited[j] = True
+
+            # optionally discard tiny groups
+            if len(group_idx) < require_min_lines:
+                # keep originals for small groups
+                for idx in group_idx:
+                    fused.append(normalized[idx])
+                continue
+
+            # collect endpoints of group
+            pts = []
+            for idx in group_idx:
+                x1, y1, x2, y2 = normalized[idx][0]
+                pts.append([x1, y1])
+                pts.append([x2, y2])
+            pts = np.array(pts, dtype=np.float32)
+
+            if pts.shape[0] < 2:
+                # fallback: push single line
+                fused.append(normalized[group_idx[0]])
+                continue
+
+            # PCA via SVD
+            mean = pts.mean(axis=0)
+            U, S, Vt = np.linalg.svd(pts - mean)
+            axis = Vt[0]
+
+            # project and find extremes
+            scalars = (pts - mean).dot(axis)
+            min_s = scalars.min()
+            max_s = scalars.max()
+            p1 = mean + axis * min_s
+            p2 = mean + axis * max_s
+
+            fused.append(np.array([[p1[0], p1[1], p2[0], p2[1]]], dtype=np.float32))
+
+        return fused
+
+    def is_line_solid(
+        self,
+        line,
+        image,
+        step: float = 0.05,
+        sample_width: int = 7,
+        sample_height: int = 15,
+        white_pixel_thresh: int = 200,
+        white_patch_ratio: float = 0.85,
+    ):
+        """
+        Determine whether a line is solid (durchgezogen) or dotted (unterbrochen).
+
+        Procedure:
+        - Sample points along the line at intervals of `step` (fraction of length).
+        - For each sample point, extract a small rectangular patch located just
+          above the point (towards image top) of size (sample_height x sample_width).
+        - Consider a patch "white" if the fraction of pixels > white_pixel_thresh
+          is >= white_patch_ratio.
+        - If >= 85% (white_patch_ratio) of the samples are white, classify the
+          whole line as solid.
+
+        Returns (is_solid: bool, white_fraction: float, n_samples: int)
+        """
+        if line is None or image is None:
+            return False, 0.0, 0
+
+        nl = self._normalize_line(line)
+        if nl is None:
+            return False, 0.0, 0
+
+        x1, y1, x2, y2 = nl[0].astype(float)
+
+        # convert image to grayscale
+        gray = image
+        if image.ndim == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # prepare sampling positions
+        t_values = np.arange(0.0, 1.0 + 1e-6, step)
+        valid_samples = 0
+        white_samples = 0
+
+        for t in t_values:
+            px = (1.0 - t) * x1 + t * x2
+            py = (1.0 - t) * y1 + t * y2
+
+            # sample patch above the point (towards image top: negative y)
+            cx = int(round(px))
+            cy = int(round(py))
+
+            top = cy - sample_height
+            bottom = cy
+            left = cx - sample_width // 2
+            right = cx + (sample_width - sample_width // 2)
+
+            # clip to image bounds
+            h, w = gray.shape[:2]
+            top = max(0, top)
+            bottom = min(h, bottom)
+            left = max(0, left)
+            right = min(w, right)
+
+            if bottom <= top or right <= left:
+                continue
+
+            patch = gray[top:bottom, left:right]
+            if patch.size == 0:
+                continue
+
+            valid_samples += 1
+            white_ratio = float(np.mean(patch > white_pixel_thresh))
+            if white_ratio >= white_patch_ratio:
+                white_samples += 1
+
+        if valid_samples == 0:
+            return False, 0.0, 0
+
+        frac = float(white_samples) / float(valid_samples)
+        is_solid = frac >= 0.85
+        return bool(is_solid), frac, valid_samples
+
+    def elongate_line(self, line, length: float = 450):
         """
         Elongate the given line to the specified length.
 
@@ -953,6 +1129,90 @@ class IntersectionDetector(SmartyNode):
 
         return True
 
+    def calculate_cones(
+        self,
+        image,
+    ):
+        """
+        Generate cones.
+
+        Arguments:
+            image -- _description_
+
+        Returns:
+            _description_
+        """
+        [xs, xe, ys, ye] = self.get_roi_bbox(image.shape)
+        cone_start_point = (int(xs + xe * 0.75), ye)
+        cone_end_point = (int(xs + xe * 0.75), ys)
+        cone_arm_left_point = (cone_end_point[0] - 85, cone_end_point[1])
+        cone_arm_right_point = (cone_end_point[0] + 85, cone_end_point[1])
+
+        cone_right = [cone_start_point, cone_arm_left_point, cone_arm_right_point]
+
+        cone_start_point = (int(xs + xe * 0.21), ys)
+        cone_end_point = (int(xs + xe * 0.21), ye)
+        cone_arm_left_point = (cone_end_point[0] - 85, cone_end_point[1])
+        cone_arm_right_point = (cone_end_point[0] + 85, cone_end_point[1])
+
+        cone_left = [cone_start_point, cone_arm_left_point, cone_arm_right_point]
+
+        return cone_left, cone_right
+
+    def _draw_cone(self, cone, image):
+        [cone_start_point, cone_arm_left_point, cone_arm_right_point] = cone
+        cv2.line(image, cone_arm_left_point, cone_start_point, (0, 255, 0), 1)
+        cv2.line(image, cone_arm_right_point, cone_start_point, (0, 255, 0), 1)
+
+        return image
+
+    def filter_lines_by_cone(self, lines, cone, require_full=True):
+        """
+        Filter lines to those that lie inside the triangular cone.
+
+        Arguments:
+            lines -- iterable of lines (any accepted format by _normalize_line)
+            cone -- list/tuple as returned by calculate_cone: [start, arm_left, arm_right]
+            require_full -- if True (default) keep only lines where both endpoints are
+                            inside the cone. If False, keep lines with at least one
+                            endpoint inside.
+
+        Returns:
+            List of normalized lines (each as numpy array shape (1,4)).
+        """
+        if not cone or lines is None:
+            return []
+
+        # Expect cone as [cone_start_point, cone_arm_left_point, cone_arm_right_point]
+        try:
+            cone_start, cone_left, cone_right = cone
+        except Exception:
+            # invalid cone format
+            return []
+
+        # polygon: left-top, right-top, bottom (triangle)
+        poly = np.array([cone_left, cone_right, cone_start], dtype=np.int32)
+
+        filtered = []
+        for ln in lines:
+            nl = self._normalize_line(ln)
+            if nl is None:
+                continue
+            x1, y1, x2, y2 = nl[0].astype(int)
+
+            # pointPolygonTest returns >0 inside, 0 on edge, <0 outside
+            d1 = cv2.pointPolygonTest(poly, (int(x1), int(y1)), False)
+            d2 = cv2.pointPolygonTest(poly, (int(x2), int(y2)), False)
+
+            if require_full:
+                if d1 >= 0 and d2 >= 0:
+                    filtered.append(nl)
+            else:
+                if d1 >= 0 or d2 >= 0:
+                    filtered.append(nl)
+
+        return filtered
+
     def pipeline(self, image):
         """
         Complete processing pipeline for intersection detection.
@@ -966,8 +1226,9 @@ class IntersectionDetector(SmartyNode):
         # blur + optional closing on the upper half of the ROI to help LSD
         # detect distorted bird's-eye parts
         image = self._blur_roi_top(
-            image, ksize=(20, 20), sigmaX=0, do_close=True, close_kernel=(25, 3)
+            image, ksize=(22, 22), sigmaX=0, do_close=True, close_kernel=(25, 3)
         )
+        cone_left, cone_right = self.calculate_cones(image)
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
         # normalize detected lines to canonical numpy (1,4) arrays
@@ -1011,6 +1272,60 @@ class IntersectionDetector(SmartyNode):
             )
 
         lines = vert + horiz
+        # save short lines for cone phase later
+
+        # find vertical lines
+        cone_lines = self.filter_lines_by_cone(lines, cone_right, require_full=True)
+        cl_vert, cl_horiz = self.filter_by_angle(cone_lines, tol_deg=5)
+        cl_vert = self.fuse_similar_lines(cl_vert, center_dist_tol=13)
+
+        cl_vert = self.filter_by_length(cl_vert, min_length=20, max_length=85)
+        l = len(cl_vert)
+        self.get_logger().info(str(l))
+
+        def calculate_distance_between(lines):
+            amount_of_lines = len(lines)
+            if amount_of_lines - 1 <= 0:
+                return
+            _sum = 0
+            for i in range(amount_of_lines - 1):
+                x11, y11, x21, y21 = lines[i][0]
+                x12, y12, x22, y22 = lines[i + 1][0]
+                diff_x = abs(x12 - x11)
+                _sum += diff_x
+
+            return _sum / (amount_of_lines - 1)
+
+        d = calculate_distance_between(cl_vert)
+        if len(cl_vert) >= 4 and 11 <= d <= 15:
+            cv2.putText(
+                image,
+                f"DOTTED_RIGHT ({l} - {d})",
+                (0, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                GREEN,
+            )
+
+        cone_lines = self.filter_lines_by_cone(lines, cone_left, require_full=True)
+        cl_vert, cl_horiz = self.filter_by_angle(cone_lines, tol_deg=5)
+        cl_vert = self.fuse_similar_lines(cl_vert, center_dist_tol=13)
+
+        cl_vert = self.filter_by_length(cl_vert, min_length=20, max_length=85)
+        l = len(cl_vert)
+        self.get_logger().info(str(l))
+
+        d = calculate_distance_between(cl_vert)
+        if len(cl_vert) >= 4 and 11 <= d <= 15:
+            cv2.putText(
+                image,
+                f"DOTTED_LEFT ({l} - {d})",
+                (0, 45),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                GREEN,
+            )
+
         lines = self.filter_by_length(lines, min_length=100)
 
         vert, horiz = self.filter_by_angle(lines)
@@ -1023,22 +1338,41 @@ class IntersectionDetector(SmartyNode):
             opp_line = self.find_opp_line(horiz, crossing_center)
 
             if ego_line is not None:
-                ego_line = self.elongate_line(ego_line)
+                ego_solid, frac, _ = self.is_line_solid(ego_line, image)
+                cv2.putText(
+                    image,
+                    f"EGO SOLID {frac}" if ego_solid else "EGO DOTTED",
+                    (0, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    GREEN,
+                )
+                ego_line_long = self.elongate_line(ego_line)
             if opp_line is not None:
-                opp_line = self.elongate_line(opp_line)
+                opp_solid, frac, _ = self.is_line_solid(opp_line, image)
+                cv2.putText(
+                    image,
+                    f"OPP SOLID {frac}" if opp_solid else "OPP DOTTED",
+                    (0, 85),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    GREEN,
+                )
+
+                opp_line_long = self.elongate_line(opp_line)
 
             pair_plausible = False
             if ego_line is not None and opp_line is not None:
                 pair_plausible = self.check_plausibility_horizontal_line_pair(
-                    opp_line, ego_line, crossing_center
+                    opp_line_long, ego_line_long, crossing_center
                 )
 
             try:
                 if ego_line is not None:
                     image = self._draw_lines(
                         image,
-                        [ego_line],
-                        color=GREEN if pair_plausible else RED,
+                        [ego_line_long],
+                        color=GREEN if pair_plausible else PINK,
                         thickness=6,
                     )
             except Exception as e:
@@ -1048,31 +1382,23 @@ class IntersectionDetector(SmartyNode):
                 if opp_line is not None:
                     image = self._draw_lines(
                         image,
-                        [opp_line],
-                        color=BLUE if pair_plausible else RED,
+                        [opp_line_long],
+                        color=GREEN if pair_plausible else PINK,
                         thickness=6,
                     )
             except Exception as e:
                 self.get_logger().error(f"find_opp_line error: {e}")
+
         else:
             # no crossing center found for this frame; skip ego/opp identification
             self.get_logger().debug(
                 "pipeline: skipping ego/opp line search, no crossing center"
             )
 
-        """
-         nearest_line = self.get_nearest_line(horiz)
-        if nearest_line is not None:
-            nearest_line = self.elongate_line(nearest_line)
-            image = self._draw_lines(image, [nearest_line], color=RED, thickness=6)
+        self._draw_cone(cone_right, image)
+        self._draw_cone(cone_left, image)
+        self._draw_lines(image, cl_vert)
 
-        lane_left, lane_right = self.detect_lane(vert, image)
-
-        if lane_right is not None:
-            lane_right = self.elongate_line(lane_right, length=450)
-            image = self._draw_lines(image, [lane_right], color=YELLOW, thickness=6)
-
-        """
         # draw roi box
         roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
         cv2.rectangle(
