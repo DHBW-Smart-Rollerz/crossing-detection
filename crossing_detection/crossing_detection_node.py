@@ -812,7 +812,8 @@ class IntersectionDetector(SmartyNode):
         sample_width: int = 7,
         sample_height: int = 15,
         white_pixel_thresh: int = 200,
-        white_patch_ratio: float = 0.85,
+        white_patch_ratio: float = 0.75,
+        below_check_thresh: float = 0.10,
     ):
         """
         Determine whether a line is solid (durchgezogen) or dotted (unterbrochen).
@@ -847,16 +848,15 @@ class IntersectionDetector(SmartyNode):
         valid_samples = 0
         white_samples = 0
 
-        for t in t_values:
-            px = (1.0 - t) * x1 + t * x2
-            py = (1.0 - t) * y1 + t * y2
+        # helper to sample patches with vertical offset direction
+        def _sample_patch(cx, cy, direction="above"):
+            if direction == "above":
+                top = cy - sample_height
+                bottom = cy
+            else:
+                top = cy
+                bottom = cy + sample_height
 
-            # sample patch above the point (towards image top: negative y)
-            cx = int(round(px))
-            cy = int(round(py))
-
-            top = cy - sample_height
-            bottom = cy
             left = cx - sample_width // 2
             right = cx + (sample_width - sample_width // 2)
 
@@ -868,23 +868,337 @@ class IntersectionDetector(SmartyNode):
             right = min(w, right)
 
             if bottom <= top or right <= left:
-                continue
+                return None
 
             patch = gray[top:bottom, left:right]
             if patch.size == 0:
+                return None
+            return float(np.mean(patch > white_pixel_thresh))
+
+        for t in t_values:
+            px = (1.0 - t) * x1 + t * x2
+            py = (1.0 - t) * y1 + t * y2
+
+            cx = int(round(px))
+            cy = int(round(py))
+
+            white_ratio = _sample_patch(cx, cy, direction="above")
+            if white_ratio is None:
                 continue
 
             valid_samples += 1
-            white_ratio = float(np.mean(patch > white_pixel_thresh))
             if white_ratio >= white_patch_ratio:
                 white_samples += 1
 
         if valid_samples == 0:
             return False, 0.0, 0
 
-        frac = float(white_samples) / float(valid_samples)
-        is_solid = frac >= 0.85
+        frac_above = float(white_samples) / float(valid_samples)
+
+        # If above fraction is already decisive, return
+        if frac_above >= white_patch_ratio:
+            return True, frac_above, valid_samples
+
+        # If fraction is very low (< below_check_thresh) check below the line
+        frac = frac_above
+        if frac_above < below_check_thresh:
+            valid_samples_b = 0
+            white_samples_b = 0
+            for t in t_values:
+                px = (1.0 - t) * x1 + t * x2
+                py = (1.0 - t) * y1 + t * y2
+                cx = int(round(px))
+                cy = int(round(py))
+
+                white_ratio_b = _sample_patch(cx, cy, direction="below")
+                if white_ratio_b is None:
+                    continue
+                valid_samples_b += 1
+                if white_ratio_b >= white_patch_ratio:
+                    white_samples_b += 1
+
+            if valid_samples_b > 0:
+                frac_below = float(white_samples_b) / float(valid_samples_b)
+                print(frac_below)
+                # use the larger fraction for final decision
+                frac = max(frac_above, frac_below)
+            else:
+                frac_below = 0.0
+
+        is_solid = frac >= white_patch_ratio
         return bool(is_solid), frac, valid_samples
+
+    def is_line_dotted_by_transitions(
+        self,
+        line,
+        image,
+        step: float = 0.05,
+        sample_width: int = 15,
+        sample_height: int = 30,
+        white_pixel_thresh: int = 200,
+        white_patch_ratio: float = 0.7,
+        min_transitions_for_dotted: int = 2,
+        draw_transitions: bool = True,
+        draw_color: tuple = GOLD,
+        draw_radius: int = 10,
+    ):
+        """
+        Traverse the line and count transitions between white and non-white.
+        patches. If the number of transitions exceeds `min_transitions_for_dotted`
+        the line is considered dotted. Returns (is_dotted, transitions, white_frac, n_samples).
+
+        The function samples a small patch above and below the line at each step
+        and considers the sample "white" if either patch contains a sufficient
+        fraction of bright pixels (>= white_patch_ratio).
+        """
+        if line is None or image is None:
+            return False, 0, 0.0, 0
+
+        nl = self._normalize_line(line)
+        if nl is None:
+            return False, 0, 0.0, 0
+
+        x1, y1, x2, y2 = nl[0].astype(float)
+
+        gray = image
+        if image.ndim == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        t_values = np.arange(0.0, 1.0 + 1e-6, step)
+        sampled = []
+        sampled_pos = []
+
+        def _patch_white(cx, cy, direction):
+            if direction == "above":
+                top = cy - sample_height
+                bottom = cy
+            else:
+                top = cy
+                bottom = cy + sample_height
+            left = cx - sample_width // 2
+            right = cx + (sample_width - sample_width // 2)
+
+            h, w = gray.shape[:2]
+            top = max(0, top)
+            bottom = min(h, bottom)
+            left = max(0, left)
+            right = min(w, right)
+            if bottom <= top or right <= left:
+                return None
+            patch = gray[top:bottom, left:right]
+            if patch.size == 0:
+                return None
+            return float(np.mean(patch > white_pixel_thresh)) >= white_patch_ratio
+
+        for t in t_values:
+            px = (1.0 - t) * x1 + t * x2
+            py = (1.0 - t) * y1 + t * y2
+            cx = int(round(px))
+            cy = int(round(py))
+
+            wa = _patch_white(cx, cy, "above")
+            wb = _patch_white(cx, cy, "below")
+
+            # prefer above if available, otherwise below, otherwise logical or
+            is_white = False
+            if wa is not None and wb is not None:
+                is_white = wa or wb
+            elif wa is not None:
+                is_white = wa
+            elif wb is not None:
+                is_white = wb
+            else:
+                # both patches invalid (out of bounds) -> skip
+                continue
+
+            sampled.append(bool(is_white))
+            sampled_pos.append((cx, cy))
+
+        n = len(sampled)
+        if n == 0:
+            return False, 0, 0.0, 0
+
+        # count transitions
+        transitions = 0
+        transition_positions = []
+        for i in range(1, n):
+            if sampled[i] != sampled[i - 1]:
+                transitions += 1
+                p1 = sampled_pos[i - 1]
+                p2 = sampled_pos[i]
+                mid = (int((p1[0] + p2[0]) // 2), int((p1[1] + p2[1]) // 2))
+                transition_positions.append(mid)
+
+        white_frac = float(np.sum(sampled)) / float(n)
+
+        # draw transition markers if requested
+        if draw_transitions and len(transition_positions) > 0:
+            try:
+                for cx, cy in transition_positions:
+                    cv2.circle(image, (int(cx), int(cy)), draw_radius, draw_color, -1)
+            except Exception:
+                pass
+
+        is_dotted = transitions >= min_transitions_for_dotted
+        return bool(is_dotted), int(transitions), float(white_frac), int(n)
+
+    def is_line_dotted_by_box_vertical_count(
+        self,
+        line,
+        image,
+        box_half_width: int = 22,
+        length_extend: float = 1.2,
+        sobel_thresh: int = 60,
+        hough_min_length: int = 13,
+        min_vertical_count: int = 2,
+        min_pair_dist: int = 30,
+        max_pair_dist: int = 50,
+        draw_box: bool = True,
+        draw_color: tuple = PINK,
+    ):
+        """
+        Rotated-box based dotted/solid detection.
+
+        Procedure:
+        - Rotate the image so the line is horizontal.
+        - Crop a rectangle centered on the line (padding along and across the line).
+        - Detect vertical edges inside the cropped patch (Sobel X -> threshold).
+        - Detect line segments (LSD/Hough) and keep near-vertical ones.
+        - Optionally filter vertical segments by nearest-neighbour horizontal distance
+          (keep segments whose nearest neighbor distance is within [min_pair_dist, max_pair_dist]).
+        - If the remaining count >= min_vertical_count => dotted.
+
+        Returns (is_dotted: bool, vertical_count: int, _, n_samples=1)
+        """
+        if line is None or image is None:
+            return False, 0, 0.0, 0
+
+        nl = self._normalize_line(line)
+        if nl is None:
+            return False, 0, 0.0, 0
+
+        x1, y1, x2, y2 = nl[0].astype(float)
+
+        # compute angle and center
+        dx = x2 - x1
+        dy = y2 - y1
+        line_len = math.hypot(dx, dy)
+        if line_len < 1e-3:
+            return False, 0, 0.0, 0
+
+        angle = math.degrees(math.atan2(dy, dx))
+        mid_x = (x1 + x2) / 2.0
+        mid_y = (y1 + y2) / 2.0
+
+        # crop size: along-line length extended + small padding; across-line fixed padding
+        crop_w = int(max(10, line_len * float(length_extend))) + int(box_half_width * 2)
+        crop_h = int(max(3, box_half_width * 2))
+
+        h, w = image.shape[:2]
+
+        # rotate whole image so the rotated box becomes axis-aligned, then crop
+        M = cv2.getRotationMatrix2D((mid_x, mid_y), -angle, 1.0)
+        warped = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR)
+
+        # transformed center
+        cx = M[0, 0] * mid_x + M[0, 1] * mid_y + M[0, 2]
+        cy = M[1, 0] * mid_x + M[1, 1] * mid_y + M[1, 2]
+
+        x0 = int(round(cx - crop_w / 2.0))
+        y0 = int(round(cy - crop_h / 2.0))
+        x1c = max(0, x0)
+        y1c = max(0, y0)
+        x2c = min(w, x0 + crop_w)
+        y2c = min(h, y0 + crop_h)
+
+        if x2c <= x1c or y2c <= y1c:
+            return False, 0, 0.0, 0
+
+        crop = warped[y1c:y2c, x1c:x2c]
+        if crop is None or crop.size == 0:
+            return False, 0, 0.0, 0
+
+        gray = crop
+        if crop.ndim == 3:
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+        # detect vertical edges using Sobel X
+        sob = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sob_abs = np.abs(sob)
+        maxv = float(sob_abs.max()) if sob_abs.size else 0.0
+        if maxv <= 1e-6:
+            edges = np.zeros_like(gray, dtype=np.uint8)
+        else:
+            sob_u = np.uint8(np.clip((sob_abs / maxv) * 255.0, 0, 255))
+            _, edges = cv2.threshold(sob_u, sobel_thresh, 255, cv2.THRESH_BINARY)
+
+        # detect line segments in the cropped edge image (use LSD detector for robustness)
+        try:
+            lines = lsd.detect(edges)[0]
+        except Exception:
+            lines = None
+
+        lines = self.filter_by_length(
+            lines, min_length=float(hough_min_length), max_length=10000.0
+        )
+        lines = self.fuse_similar_lines(lines, angle_tol_deg=10.0, center_dist_tol=30.0)
+
+        vertical_segments = []
+        if lines is not None:
+            for seg in lines:
+                xa, ya, xb, yb = seg[0]
+                ddx = xb - xa
+                ddy = yb - ya
+                ang = abs(math.degrees(math.atan2(ddy, ddx)))
+                # near-vertical in the cropped (rotated) coordinate system -> angle near 90
+                if 80 < ang < 100:
+                    vertical_segments.append((xa, ya, xb, yb))
+
+        if not vertical_segments:
+            return False, 0, 0.0, 1
+
+        # filter segments by pairwise nearest-neighbor horizontal distance (in crop coords)
+        xs = [((s[0] + s[2]) / 2.0) for s in vertical_segments]
+        keep_mask = [False] * len(xs)
+        for i, xi in enumerate(xs):
+            dists = [abs(xi - xj) for j, xj in enumerate(xs) if j != i]
+            if not dists:
+                continue
+            nearest = min(dists)
+            if (nearest >= float(min_pair_dist)) and (nearest <= float(max_pair_dist)):
+                keep_mask[i] = True
+
+        filtered_segments = [
+            seg for k, seg in enumerate(vertical_segments) if keep_mask[k]
+        ]
+        vertical_count = len(filtered_segments)
+
+        # draw box (parallel to the original line) and filtered vertical lines back into
+        # original image if requested
+        if draw_box or len(filtered_segments) > 0:
+            try:
+                box = ((mid_x, mid_y), (float(crop_w), float(crop_h)), angle)
+                pts = cv2.boxPoints(box).astype(int)
+                cv2.polylines(image, [pts], True, draw_color, 2)
+
+                M_inv = cv2.invertAffineTransform(M)
+                for xa, ya, xb, yb in filtered_segments:
+                    p1 = np.array([xa + x1c, ya + y1c, 1.0], dtype=np.float32)
+                    p2 = np.array([xb + x1c, yb + y1c, 1.0], dtype=np.float32)
+                    op1 = p1.dot(M_inv.T)
+                    op2 = p2.dot(M_inv.T)
+                    cv2.line(
+                        image,
+                        (int(op1[0]), int(op1[1])),
+                        (int(op2[0]), int(op2[1])),
+                        draw_color,
+                        2,
+                    )
+            except Exception:
+                pass
+
+        is_dotted = vertical_count >= int(min_vertical_count)
+        return bool(is_dotted), int(vertical_count), 0.0, 1
 
     def elongate_line(self, line, length: float = 450):
         """
@@ -917,6 +1231,66 @@ class IntersectionDetector(SmartyNode):
         new_y2 = int(line_center_y + new_delta_y / 2)
 
         return [[new_x1, new_y1, new_x2, new_y2]]
+
+    def is_line_within_front_roi(
+        self, line, image, min_rel: float = 0.5, max_rel: float = 0.75
+    ):
+        """Return True if the line center lies within the horizontal ROI fraction [min_rel,max_rel]."""
+        if line is None or image is None:
+            return False
+        nl = self._normalize_line(line)
+        if nl is None:
+            return False
+        x1, y1, x2, y2 = nl[0].astype(float)
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+        roi_w = float(roi_right - roi_left)
+        min_x = roi_left + roi_w * float(min_rel)
+        max_x = roi_left + roi_w * float(max_rel)
+        cx = (x1 + x2) / 2.0
+        return (cx >= min_x) and (cx <= max_x)
+
+    def clip_line_to_vertical_bounds(
+        self, line, image, min_rel: float = 0.5, max_rel: float = 0.75
+    ):
+        """
+        Clip a line segment to vertical boundaries defined by ROI fractions.
+
+        Returns a normalized numpy line [[x1,y1,x2,y2]] (float32) or None if
+        the segment lies completely outside the vertical band.
+        """
+        if line is None or image is None:
+            return None
+        nl = self._normalize_line(line)
+        if nl is None:
+            return None
+        x1, y1, x2, y2 = nl[0].astype(float)
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+        roi_w = float(roi_right - roi_left)
+        min_x = roi_left + roi_w * float(min_rel)
+        max_x = roi_left + roi_w * float(max_rel)
+
+        dx = x2 - x1
+        dy = y2 - y1
+        # vertical segment
+        if abs(dx) < 1e-3:
+            if x1 < min_x or x1 > max_x:
+                return None
+            return np.array([[x1, y1, x2, y2]], dtype=np.float32)
+
+        # compute param t where x = min_x and x = max_x
+        t_min = (min_x - x1) / dx
+        t_max = (max_x - x1) / dx
+        t0 = max(0.0, min(t_min, t_max))
+        t1 = min(1.0, max(t_min, t_max))
+        if t1 <= t0:
+            return None
+
+        nx1 = x1 + t0 * dx
+        ny1 = y1 + t0 * dy
+        nx2 = x1 + t1 * dx
+        ny2 = y1 + t1 * dy
+
+        return np.array([[nx1, ny1, nx2, ny2]], dtype=np.float32)
 
     def find_intersections(self, lines1, lines2):
         """
@@ -1096,7 +1470,8 @@ class IntersectionDetector(SmartyNode):
         opp_line,
         ego_line,
         intersection_point,
-        line_horizontal_distance_threshold: float = 60.0,
+        line_horizontal_distance_threshold: float = 100.0,
+        line_vertical_distance_threshold: float = 80.0,
         center_horizontal_distance_threshold: float = 100.0,
         negative_line_overlap_threshold: float = -80.0,
     ):
@@ -1111,14 +1486,18 @@ class IntersectionDetector(SmartyNode):
         Returns:
             True if the pair is plausible, False otherwise.
         """
-        x1_1, _, x2_1, _ = ego_line[0]
-        x1_2, _, x2_2, _ = opp_line[0]
+        x1_1, y1_1, x2_1, y2_1 = ego_line[0]
+        x1_2, y1_2, x2_2, y2_2 = opp_line[0]
         ego_line_leftmost = min(x1_1, x2_1)
         opp_line_rightmost = max(x1_2, x2_2)
-        distance_between_lines = ego_line_leftmost - opp_line_rightmost
+        distance_between_lines_horizontal = ego_line_leftmost - opp_line_rightmost
         # if distance_between_lines < negative_line_overlap_threshold:
         #    return False
-        if distance_between_lines > line_horizontal_distance_threshold:
+        if distance_between_lines_horizontal > line_horizontal_distance_threshold:
+            return False
+
+        distance_between_lines_vertical = abs(((y1_1 + y2_1) / 2) - ((y1_2 + y2_2) / 2))
+        if distance_between_lines_vertical < line_vertical_distance_threshold:
             return False
 
         # distance_to_center = abs(
@@ -1338,28 +1717,77 @@ class IntersectionDetector(SmartyNode):
             opp_line = self.find_opp_line(horiz, crossing_center)
 
             if ego_line is not None:
-                ego_solid, frac, _ = self.is_line_solid(ego_line, image)
+                # use transition-based dotted detection and draw transitions
+                ego_line_long = self.elongate_line(ego_line)
+                # clip elongated ego line to front ROI vertical band and use clipped segment
+                clipped_ego = self.clip_line_to_vertical_bounds(
+                    ego_line_long, image, min_rel=0.5, max_rel=0.75
+                )
+                (
+                    ego_dotted,
+                    ego_trans,
+                    ego_white_frac,
+                    ego_n,
+                ) = self.is_line_dotted_by_box_vertical_count(
+                    clipped_ego,
+                    image,
+                    draw_box=True,
+                    draw_color=GOLD,
+                )
+                label = (
+                    f"EGO DOTTED (t={ego_trans})"
+                    if ego_dotted
+                    else f"EGO SOLID (t={ego_trans})"
+                )
                 cv2.putText(
                     image,
-                    f"EGO SOLID {frac}" if ego_solid else "EGO DOTTED",
+                    label,
                     (0, 65),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     GREEN,
                 )
-                ego_line_long = self.elongate_line(ego_line)
+
+                if clipped_ego is None:
+                    ego_line_long = None
+                else:
+                    ego_line_long = clipped_ego
+
             if opp_line is not None:
-                opp_solid, frac, _ = self.is_line_solid(opp_line, image)
+                # draw transitions for opp line as well
+                opp_line_long = self.elongate_line(opp_line)
+                clipped_opp = self.clip_line_to_vertical_bounds(
+                    opp_line_long, image, min_rel=0.15, max_rel=0.4
+                )
+                (
+                    opp_dotted,
+                    opp_trans,
+                    opp_white_frac,
+                    opp_n,
+                ) = self.is_line_dotted_by_box_vertical_count(
+                    clipped_opp,
+                    image,
+                    draw_box=True,
+                    draw_color=GOLD,
+                )
+                label2 = (
+                    f"OPP DOTTED (t={opp_trans})"
+                    if opp_dotted
+                    else f"OPP SOLID (t={opp_trans})"
+                )
                 cv2.putText(
                     image,
-                    f"OPP SOLID {frac}" if opp_solid else "OPP DOTTED",
+                    label2,
                     (0, 85),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     GREEN,
                 )
 
-                opp_line_long = self.elongate_line(opp_line)
+                if clipped_opp is None:
+                    opp_line_long = None
+                else:
+                    opp_line_long = clipped_opp
 
             pair_plausible = False
             if ego_line is not None and opp_line is not None:
