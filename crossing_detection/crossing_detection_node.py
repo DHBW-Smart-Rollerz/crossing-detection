@@ -14,6 +14,8 @@ from smarty_utils.enums import NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
 
+DEBUG = False
+
 # Color constants (BGR tuples)
 RED = (0, 0, 255)
 GREEN = (0, 255, 0)
@@ -60,7 +62,7 @@ class IntersectionDetector(SmartyNode):
                 # Subscriber topics
                 "image_subscriber": "/camera/birds_eye",
                 # Publisher topics
-                "debug_image_publisher": "/crossing_detection/output_view",
+                "debug_image_publisher": "/crossing_detection/debug/image",
                 "result_publisher": "/crossing_detection/result",
                 # Parameters
                 "state": NodeState.ACTIVE.value,
@@ -119,6 +121,11 @@ class IntersectionDetector(SmartyNode):
 
             # run the pipeline on the cv2 image
             self.pipeline(img)
+
+            if not DEBUG:
+                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                output_img = self.cv_bridge.cv2_to_imgmsg(img, encoding="bgr8")
+                self.debug_image_publisher.publish(output_img)
 
         except Exception as e:
             self.get_logger().error(f"image_callback error: {e}")
