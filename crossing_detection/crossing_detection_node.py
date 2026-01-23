@@ -60,12 +60,11 @@ class IntersectionDetector(SmartyNode):
                 # Subscriber topics
                 "image_subscriber": "/camera/birds_eye",
                 # Publisher topics
-                "debug_image_publisher": "/example/birdseye_view",
-                "result_publisher": "/example/result",
+                "debug_image_publisher": "/crossing_detection/output_view",
+                "result_publisher": "/crossing_detection/result",
                 # Parameters
                 "state": NodeState.ACTIVE.value,
                 "image_path": "resources/img/example.png",
-                "example_value": 128,
                 "debug": False,
                 "compute_crossing_center": False,
             },
