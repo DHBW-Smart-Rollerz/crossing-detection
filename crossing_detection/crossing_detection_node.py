@@ -14,7 +14,7 @@ from smarty_utils.enums import NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
 
-DEBUG = False
+DEBUG = True
 
 # Color constants (BGR tuples)
 RED = (0, 0, 255)
@@ -122,7 +122,7 @@ class IntersectionDetector(SmartyNode):
             # run the pipeline on the cv2 image
             img_dbg = self.pipeline(img)
 
-            if not DEBUG:
+            if DEBUG:
                 img_dbg = cv2.cvtColor(img_dbg, cv2.COLOR_RGB2BGR)
                 output_img = self.cv_bridge.cv2_to_imgmsg(img_dbg, encoding="bgr8")
                 self.debug_image_publisher.publish(output_img)
@@ -1858,9 +1858,9 @@ class IntersectionDetector(SmartyNode):
 
         return image
 
-        # IntersectionDetector.save_img_to_dir(
-        #    image, time.perf_counter_ns().__str__() + "_full.jpg"
-        # )
+        IntersectionDetector.save_img_to_dir(
+            image, time.perf_counter_ns().__str__() + "_full.jpg"
+        )
 
 
 def main(args=None):
