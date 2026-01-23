@@ -120,11 +120,11 @@ class IntersectionDetector(SmartyNode):
                     img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
             # run the pipeline on the cv2 image
-            self.pipeline(img)
+            img_dbg = self.pipeline(img)
 
             if not DEBUG:
-                img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                output_img = self.cv_bridge.cv2_to_imgmsg(img, encoding="bgr8")
+                img_dbg = cv2.cvtColor(img_dbg, cv2.COLOR_RGB2BGR)
+                output_img = self.cv_bridge.cv2_to_imgmsg(img_dbg, encoding="bgr8")
                 self.debug_image_publisher.publish(output_img)
 
         except Exception as e:
@@ -1856,9 +1856,11 @@ class IntersectionDetector(SmartyNode):
             ],
         )
 
-        IntersectionDetector.save_img_to_dir(
-            image, time.perf_counter_ns().__str__() + "_full.jpg"
-        )
+        return image
+
+        # IntersectionDetector.save_img_to_dir(
+        #    image, time.perf_counter_ns().__str__() + "_full.jpg"
+        # )
 
 
 def main(args=None):
