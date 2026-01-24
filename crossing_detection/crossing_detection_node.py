@@ -49,7 +49,7 @@ class LaneType(IntEnum):
 
 RESULT_DIR_NAME = f"crossing_results/{time.strftime('%Y%m%d-%H%M%S')}"
 # FILTERING_ROI_REL_RLTB = (0.80, 0, 0.12, 0.45)  # left, right, top, bottom
-FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.7)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.8)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
