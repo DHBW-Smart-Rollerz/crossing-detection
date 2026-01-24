@@ -37,10 +37,14 @@ GOLD = (0, 215, 255)
 class LaneType(IntEnum):
     """Declare types of lines."""
 
-    EGO_SOLID = 19
-    EGO_DOTTED = 20
-    OPP_SOLID = 21
-    OPP_DOTTED = 22
+    EGO_SOLID = 20
+    EGO_DOTTED = 21
+    OPP_SOLID = 22
+    OPP_DOTTED = 23
+    RIGHT_SOLID = 24
+    RIGHT_DOTTED = 25
+    LEFT_SOLID = 26
+    LEFT_DOTTED = 27
 
 
 RESULT_DIR_NAME = f"crossing_results/{time.strftime('%Y%m%d-%H%M%S')}"
