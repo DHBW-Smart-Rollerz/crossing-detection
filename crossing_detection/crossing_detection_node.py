@@ -1,6 +1,7 @@
 import math
 import os
 import time
+from enum import IntEnum
 from statistics import mode
 
 import cv2
@@ -31,6 +32,16 @@ PINK = (255, 0, 180)
 VIOLET = (180, 50, 255)
 TURQUOISE = (255, 255, 100)
 GOLD = (0, 215, 255)
+
+
+class LaneType(IntEnum):
+    """Declare types of lines."""
+
+    EGO_SOLID = 19
+    EGO_DOTTED = 20
+    OPP_SOLID = 21
+    OPP_DOTTED = 22
+
 
 RESULT_DIR_NAME = f"crossing_results/{time.strftime('%Y%m%d-%H%M%S')}"
 # FILTERING_ROI_REL_RLTB = (0.80, 0, 0.12, 0.45)  # left, right, top, bottom
@@ -79,7 +90,7 @@ class IntersectionDetector(SmartyNode):
             },
             published_topics={
                 "debug_image_publisher": (sensor_msgs.msg.Image, 1),
-                "result_publisher": (std_msgs.msg.Float32, 1),
+                "result_publisher": (std_msgs.msg.Float32MultiArray, 1),
             },
         )
 
@@ -119,8 +130,17 @@ class IntersectionDetector(SmartyNode):
                 if img.ndim == 2:
                     img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-            # run the pipeline on the cv2 image
-            img_dbg = self.pipeline(img)
+            # run the pipeline on the cv2 image (returns image and result array)
+            img_dbg, result_list = self.pipeline(img)
+
+            # publish result_list as Float32MultiArray
+            try:
+                msg_out = std_msgs.msg.Float32MultiArray(
+                    data=[float(x) for x in result_list]
+                )
+                self.result_publisher.publish(msg_out)
+            except Exception as e:
+                self.get_logger().error(f"publishing result failed: {e}")
 
             if DEBUG:
                 img_dbg = cv2.cvtColor(img_dbg, cv2.COLOR_RGB2BGR)
@@ -146,11 +166,11 @@ class IntersectionDetector(SmartyNode):
 
         with timer.Timer(name="publish", filter_strength=40):
             # Publish the result as the custom ROS2 message defined in this package
-            self.result_publisher.publish(  # type: ignore
-                std_msgs.msg.Float32(
-                    data=res,
-                )
-            )
+            try:
+                msg = std_msgs.msg.Float32MultiArray(data=[0.0])
+                self.result_publisher.publish(msg)
+            except Exception:
+                pass
 
         if self._debug:
             with timer.Timer(name="debug", filter_strength=40):
@@ -1856,11 +1876,60 @@ class IntersectionDetector(SmartyNode):
             ],
         )
 
-        return image
+        # build result array for publisher: each record = [type_code, x1, y1, x2, y2, confidence]
+        # type_code: 1=ego_solid, 2=ego_dotted, 3=opp_solid, 4=opp_dotted
+        result_list = []
 
-        IntersectionDetector.save_img_to_dir(
-            image, time.perf_counter_ns().__str__() + "_full.jpg"
-        )
+        def _push_entry(code, line, conf=1.0):
+            if line is None:
+                return
+            nl = self._normalize_line(line)
+            if nl is None:
+                return
+            x1p, y1p, x2p, y2p = nl[0].astype(float)
+            # ensure enum values are converted to their integer codes
+            try:
+                code_int = int(code)
+            except Exception:
+                code_int = int(float(code))
+            result_list.extend(
+                [
+                    float(code_int),
+                    float(x1p),
+                    float(y1p),
+                    float(x2p),
+                    float(y2p),
+                    float(conf),
+                ]
+            )
+
+        try:
+            # ego
+            if "clipped_ego" in locals() and clipped_ego is not None:
+                code = (
+                    LaneType.EGO_DOTTED
+                    if ("ego_dotted" in locals() and ego_dotted)
+                    else LaneType.EGO_SOLID
+                )
+                _push_entry(code, clipped_ego, conf=1.0)
+            # opp
+            if "clipped_opp" in locals() and clipped_opp is not None:
+                code = (
+                    LaneType.OPP_DOTTED
+                    if ("opp_dotted" in locals() and opp_dotted)
+                    else LaneType.OPP_SOLID
+                )
+                _push_entry(code, clipped_opp, conf=1.0)
+        except Exception:
+            # on any error, leave result_list empty
+            result_list = []
+
+        # save debug image and return image + result list
+        # IntersectionDetector.save_img_to_dir(
+        #    image, time.perf_counter_ns().__str__() + "_full.jpg"
+        # )
+
+        return image, result_list
 
 
 def main(args=None):
