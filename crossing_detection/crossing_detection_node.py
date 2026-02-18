@@ -47,7 +47,6 @@ class LaneType(IntEnum):
     LEFT_DOTTED = 27
 
 
-RESULT_DIR_NAME = f"crossing_results/{time.strftime('%Y%m%d-%H%M%S')}"
 # FILTERING_ROI_REL_RLTB = (0.80, 0, 0.12, 0.45)  # left, right, top, bottom
 FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.8)  # left, right, top, bottom
 
@@ -65,8 +64,6 @@ class IntersectionDetector(SmartyNode):
     Returns:
         None
     """
-
-    DBG_IMG_DIR = "/home/smartrollerz/Desktop/smartrollers/smarty_workspace/rosbag_images/rosbag2_2025_03_06-17_56_01"
 
     def __init__(self):
         """Initialize the ROS2ExampleNode."""
@@ -116,11 +113,6 @@ class IntersectionDetector(SmartyNode):
             self.package_path,
             self.get_parameter("image_path").value,  # type: ignore
         )  # type: ignore # full path to the image
-
-    @property
-    def example_value(self) -> int:
-        """Get the example value parameter."""
-        return self.get_parameter("example_value").value  # type: ignore
 
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
@@ -323,20 +315,6 @@ class IntersectionDetector(SmartyNode):
             pass
 
         return image
-
-    @staticmethod
-    def save_img_to_dir(img, img_name: str):
-        """
-        Save an image to a specified directory.
-
-        Arguments:
-            img -- Image to be saved.
-            dir_path -- Directory path where the image will be saved.
-            img_name -- Name of the image file.
-        """
-        if not os.path.exists(RESULT_DIR_NAME):
-            os.makedirs(RESULT_DIR_NAME)
-        cv2.imwrite(os.path.join(RESULT_DIR_NAME, img_name), img)
 
     @staticmethod
     def show_image(img, title: str = "Graphic"):
