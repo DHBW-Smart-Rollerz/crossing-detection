@@ -146,10 +146,9 @@ class IntersectionDetector(SmartyNode):
             except Exception as e:
                 self.get_logger().error(f"publishing result failed: {e}")
 
-            if DEBUG:
-                img_dbg = cv2.cvtColor(img_dbg, cv2.COLOR_RGB2BGR)
-                output_img = self.cv_bridge.cv2_to_imgmsg(img_dbg, encoding="bgr8")
-                self.debug_image_publisher.publish(output_img)
+            img_dbg = cv2.cvtColor(img_dbg, cv2.COLOR_RGB2BGR)
+            output_img = self.cv_bridge.cv2_to_imgmsg(img_dbg, encoding="bgr8")
+            self.debug_image_publisher.publish(output_img)
 
         except Exception as e:
             self.get_logger().error(f"image_callback error: {e}")
@@ -187,7 +186,7 @@ class IntersectionDetector(SmartyNode):
                     self.cv_bridge.cv2_to_imgmsg(image, encoding="8UC1")
                 )
 
-        timer.Timer(logger=self.get_logger().info).print()  # type: ignore
+    # instrumentation printing removed to avoid console noise in production
 
     @staticmethod
     def load_img_grayscale(img_path: str) -> np.ndarray:
@@ -203,6 +202,127 @@ class IntersectionDetector(SmartyNode):
         img = cv2.imread(img_path)
         # gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         return img
+
+    def _render_debug_overlays(
+        self,
+        image,
+        transformed_lines=None,
+        filtered_lines=None,
+        vert=None,
+        horiz=None,
+        crossing_center=None,
+        cone_left=None,
+        cone_right=None,
+        cl_vert=None,
+        cl_vert_left=None,
+        ego_line_long=None,
+        opp_line_long=None,
+        pair_plausible=False,
+        label=None,
+        label2=None,
+    ):
+        """
+        Draw all debug overlays at once on a provided image.
+        This keeps the detection logic separated from visualization.
+        """
+        # draw basic line sets
+        if transformed_lines is not None:
+            image = self._draw_lines(image, transformed_lines, color=MAGENTA)
+
+        if vert is not None:
+            image = self._draw_lines(image, vert, color=RED)
+
+        # crossing center markers
+        if crossing_center is not None:
+            try:
+                image = cv2.circle(image, crossing_center, 8, YELLOW)
+                crossing_center_pulled = self.pull_point_to_roi_center(
+                    crossing_center, image.shape
+                )
+                image = cv2.circle(
+                    image,
+                    (int(crossing_center_pulled[0]), int(crossing_center_pulled[1])),
+                    8,
+                    TURQUOISE,
+                )
+            except Exception:
+                pass
+
+        # cones and small vertical clusters
+        try:
+            if cone_right is not None:
+                self._draw_cone(cone_right, image)
+            if cone_left is not None:
+                self._draw_cone(cone_left, image)
+            if cl_vert is not None:
+                image = self._draw_lines(image, cl_vert)
+            if cl_vert_left is not None:
+                image = self._draw_lines(image, cl_vert_left)
+        except Exception:
+            pass
+
+        # ego/opp lines and labels
+        try:
+            if ego_line_long is not None:
+                image = self._draw_lines(
+                    image,
+                    [ego_line_long],
+                    color=GREEN if pair_plausible else PINK,
+                    thickness=6,
+                )
+            if opp_line_long is not None:
+                image = self._draw_lines(
+                    image,
+                    [opp_line_long],
+                    color=GREEN if pair_plausible else PINK,
+                    thickness=6,
+                )
+        except Exception:
+            pass
+
+        # put labels if provided
+        try:
+            if label is not None:
+                cv2.putText(
+                    image,
+                    label,
+                    (0, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    GREEN,
+                )
+            if label2 is not None:
+                cv2.putText(
+                    image,
+                    label2,
+                    (0, 85),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    GREEN,
+                )
+        except Exception:
+            pass
+
+        # draw roi box and legend
+        try:
+            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+            cv2.rectangle(image, (roi_left, roi_top), (roi_right, roi_bottom), RED, 2)
+            image = self._draw_legend(
+                image,
+                [
+                    ("All lines (LSD)", MAGENTA),
+                    ("EGO LINE", GREEN),
+                    ("OPP LINE", BLUE),
+                    ("NON PLAUSIBLE LINEPAIR", RED),
+                    ("Calculated Intersection Center", YELLOW),
+                    ("Weighted Intersection Center", TURQUOISE),
+                    ("ROI box", RED),
+                ],
+            )
+        except Exception:
+            pass
+
+        return image
 
     @staticmethod
     def save_img_to_dir(img, img_name: str):
@@ -478,85 +598,6 @@ class IntersectionDetector(SmartyNode):
                 res.append(line)
 
         return res
-
-    def crop_image_center(self, image):
-        """
-        Crop the image to a centered square.
-
-        Arguments:
-            image -- Input image.
-
-        Returns:
-            Cropped image.
-        """
-        # add docstring
-        # how to crop the image (also with birdseye?)
-        # also transform crop coordinates into real image coordinates later
-        img = image[::]
-        imsize = img.shape
-        height = imsize[0]
-        width = imsize[1]
-
-        crop_height = 350
-        crop_width = 350
-
-        start_y = (height - crop_height) // 2
-        start_x = (width - crop_width) // 2
-
-        image = image[
-            start_y : start_y + crop_height, start_x : start_x + crop_width, :
-        ]
-        return image
-
-    def crop_image(self, image):
-        """
-        Crop the image to a centered rectangle.
-
-        Arguments:
-            image -- Input image.
-
-        Returns:
-            Cropped image.
-        """
-        # add docstring
-        # how to crop the image (also with birdseye?)
-        # also transform crop coordinates into real image coordinates later
-        img = image[::]
-        imsize = img.shape
-        height = imsize[0]
-        width = imsize[1]
-
-        crop_height = 300
-        crop_width = width - 100
-
-        start_x = (width - crop_width) // 2
-
-        image = image[crop_height:height, start_x : start_x + crop_width, :]
-        return image
-
-    def contours(self, edges, img):
-        """
-        Find and draw contours on the image.
-
-        Arguments:
-            edges -- Edge-detected
-            img -- Input image.
-        """
-        contours, hierarchy = cv2.findContours(
-            edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        # Boxen auf das Farbbild zeichnen
-        for contour in contours:
-            rect = cv2.minAreaRect(contour)
-            box = cv2.boxPoints(rect)
-            box = np.int32(box)
-
-            # Zeichne die Box auf das Farbbild
-            cv2.drawContours(img, [box], 0, (0, 255, 0), 2)
-
-        # Speichere das Bild mit den Boxen
-        IntersectionDetector.show_image(img, "contours")
 
     def line_segment_detector(self, img):
         """
@@ -949,7 +990,6 @@ class IntersectionDetector(SmartyNode):
 
             if valid_samples_b > 0:
                 frac_below = float(white_samples_b) / float(valid_samples_b)
-                print(frac_below)
                 # use the larger fraction for final decision
                 frac = max(frac_above, frac_below)
             else:
@@ -1631,6 +1671,9 @@ class IntersectionDetector(SmartyNode):
         """
         # image = IntersectionDetector.load_img_grayscale(img_path)
         # image = self.crop_image(image)
+
+        # keep a copy of the original image for rendering overlays later
+        orig_image = image.copy()
 
         # blur + optional closing on the upper half of the ROI to help LSD
         # detect distorted bird's-eye parts
