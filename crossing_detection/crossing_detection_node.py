@@ -214,8 +214,6 @@ class IntersectionDetector(SmartyNode):
         pair_plausible=False,
         label=None,
         label2=None,
-        cat_eye_left=None,
-        cat_eye_right=None,
     ):
         """
         Draw all debug overlays at once on a provided image.
@@ -226,17 +224,7 @@ class IntersectionDetector(SmartyNode):
             image = self._draw_lines(image, transformed_lines, color=MAGENTA)
 
         if vert is not None:
-            image = self._draw_lines(image, vert, color=RED)
-
-        # Draw cat_eye regions if present
-        if cat_eye_left is not None:
-            image = self._draw_cat_eye(
-                cat_eye_left, image, color=(255, 165, 0), thickness=2
-            )
-        if cat_eye_right is not None:
-            image = self._draw_cat_eye(
-                cat_eye_right, image, color=(255, 165, 0), thickness=2
-            )
+            image = self._draw_lines(image, vert, color=GOLD)
 
         # crossing center markers
         if crossing_center is not None:
@@ -273,14 +261,14 @@ class IntersectionDetector(SmartyNode):
                 image = self._draw_lines(
                     image,
                     [ego_line_long],
-                    color=GREEN if pair_plausible else PINK,
+                    color=LIME,
                     thickness=6,
                 )
             if opp_line_long is not None:
                 image = self._draw_lines(
                     image,
                     [opp_line_long],
-                    color=GREEN if pair_plausible else PINK,
+                    color=LIME if pair_plausible else ORANGE,
                     thickness=6,
                 )
         except Exception:
@@ -292,14 +280,14 @@ class IntersectionDetector(SmartyNode):
                 image = self._draw_lines(
                     image,
                     [stop_line_right],
-                    color=CYAN,
+                    color=VIOLET,
                     thickness=4,
                 )
             if stop_line_left is not None:
                 image = self._draw_lines(
                     image,
                     [stop_line_left],
-                    color=CYAN,
+                    color=VIOLET,
                     thickness=4,
                 )
         except Exception:
@@ -335,13 +323,14 @@ class IntersectionDetector(SmartyNode):
             image = self._draw_legend(
                 image,
                 [
-                    ("All lines (LSD)", MAGENTA),
-                    ("EGO LINE", GREEN),
-                    ("OPP LINE", BLUE),
-                    ("NON PLAUSIBLE LINEPAIR", RED),
-                    ("Calculated Intersection Center", YELLOW),
-                    ("Weighted Intersection Center", TURQUOISE),
-                    ("ROI box", RED),
+                    ("Transformed lines", MAGENTA),
+                    ("Vertical lines", GOLD),
+                    ("Ego line", LIME),
+                    ("Opp plausible", LIME),
+                    ("Opp implausible", ORANGE),
+                    ("Stop lines", VIOLET),
+                    ("Crossing center", YELLOW),
+                    ("Center (ROI)", TURQUOISE),
                 ],
             )
         except Exception:
@@ -626,7 +615,7 @@ class IntersectionDetector(SmartyNode):
 
     def _draw_legend(self, image, items, box_size=18, padding=8):
         """
-        Draw a small legend on the image.
+        Draw a small legend on the image at the bottom-right.
 
         items: list of (label, bgr_color)
         """
@@ -648,12 +637,12 @@ class IntersectionDetector(SmartyNode):
                 max_label_width = w
         legend_width = box_size + 6 + max_label_width + padding * 2
 
-        # origin at bottom-left with 10px margin
+        # origin at bottom-right with 10px margin
         margin = 10
-        origin_x = margin
+        origin_x = width - margin - legend_width
         origin_y = height - margin - legend_height
 
-        # prevent drawing outside image (fallback to top-left if too large)
+        # prevent drawing outside image (fallback to top-right if too large)
         if origin_y < 0:
             origin_y = margin
 
@@ -1467,10 +1456,16 @@ class IntersectionDetector(SmartyNode):
 
         # Cat's eye left (at ~0.25 of ROI width) for left stop line
         x_left = int(xs + roi_width * 0.25)
-        top_point_left = (x_left - int(roi_width * 0.10), int(roi_center_y))
-        right_point_left = (x_left, int(ys + roi_height * 0.18))
-        bottom_point_left = (x_left + int(roi_width * 0.10), int(roi_center_y))
-        left_point_left = (x_left, int(ys + roi_height * 0.81))
+        top_point_left = (
+            x_left - int(roi_width * 0.10),
+            int(roi_height * 0.70 + ys),
+        )
+        right_point_left = (x_left, int(ys + roi_height * 0.35))
+        bottom_point_left = (
+            x_left + int(roi_width * 0.10),
+            int(roi_height * 0.70 + ys),
+        )
+        left_point_left = (x_left, int(ys + roi_height * 0.98))
         cat_eye_left = [
             top_point_left,
             right_point_left,
@@ -1480,10 +1475,13 @@ class IntersectionDetector(SmartyNode):
 
         # Cat's eye right (at ~0.7 of ROI width) for right stop line
         x_right = int(xs + roi_width * 0.73)
-        top_point_right = (x_right - int(roi_width * 0.10), int(roi_center_y))
-        right_point_right = (x_right, int(ys + roi_height * 0.18))
-        bottom_point_right = (x_right + int(roi_width * 0.10), int(roi_center_y))
-        left_point_right = (x_right, int(ys + roi_height * 0.81))
+        top_point_right = (x_right - int(roi_width * 0.10), int(roi_height * 0.3 + ys))
+        right_point_right = (x_right, int(ys + roi_height * 0.02))
+        bottom_point_right = (
+            x_right + int(roi_width * 0.10),
+            int(roi_height * 0.3 + ys),
+        )
+        left_point_right = (x_right, int(ys + roi_height * 0.65))
         cat_eye_right = [
             top_point_right,
             right_point_right,
@@ -1492,6 +1490,119 @@ class IntersectionDetector(SmartyNode):
         ]
 
         return cat_eye_left, cat_eye_right
+
+    def calculate_roi_quadrants(self, image):
+        """
+        Split the ROI into 4 quadrants for line detection.
+
+        Returns quadrants positioned as:
+        [Q1(top-left), Q2(top-right), Q3(bottom-left), Q4(bottom-right)]
+
+        Each quadrant is a polygon (list of 4 corner points).
+
+        Arguments:
+            image -- Input image
+
+        Returns:
+            Tuple of 4 quadrants, each as list of 4 points
+        """
+        [xs, xe, ys, ye] = self.get_roi_bbox(image.shape)
+
+        # ROI center point
+        x_center = (xs + xe) / 2.0
+        y_center = (ys + ye) / 2.0
+
+        # Q1: Top-left quadrant
+        q1 = [
+            (int(xs), int(ys)),  # top-left corner
+            (int(x_center), int(ys)),  # top-center
+            (int(x_center), int(y_center)),  # center
+            (int(xs), int(y_center)),  # left-center
+        ]
+
+        # Q2: Top-right quadrant
+        q2 = [
+            (int(x_center), int(ys)),  # top-center
+            (int(xe), int(ys)),  # top-right corner
+            (int(xe), int(y_center)),  # right-center
+            (int(x_center), int(y_center)),  # center
+        ]
+
+        # Q3: Bottom-left quadrant
+        q3 = [
+            (int(xs), int(y_center)),  # left-center
+            (int(x_center), int(y_center)),  # center
+            (int(x_center), int(ye)),  # bottom-center
+            (int(xs), int(ye)),  # bottom-left corner
+        ]
+
+        # Q4: Bottom-right quadrant
+        q4 = [
+            (int(x_center), int(y_center)),  # center
+            (int(xe), int(y_center)),  # right-center
+            (int(xe), int(ye)),  # bottom-right corner
+            (int(x_center), int(ye)),  # bottom-center
+        ]
+
+        return q1, q2, q3, q4
+
+    def _draw_quadrants(
+        self, image, q1, q2, q3, q4, color=(100, 100, 100), thickness=1
+    ):
+        """
+        Draw the 4 ROI quadrants on the image.
+
+        Arguments:
+            image -- Image to draw on
+            q1, q2, q3, q4 -- Quadrant polygons (lists of 4 points each)
+            color -- Line color in BGR format
+            thickness -- Line thickness
+
+        Returns:
+            Image with quadrants drawn
+        """
+        for quad in [q1, q2, q3, q4]:
+            pts = np.array(quad, np.int32)
+            cv2.polylines(image, [pts], True, color, thickness)
+        return image
+
+    def find_line_in_quadrant(self, lines, quadrant, min_length: float = 30.0):
+        """
+        Find the longest vertical line inside a quadrant.
+
+        Arguments:
+            lines -- List of detected line segments
+            quadrant -- Quadrant polygon (list of 4 points)
+            min_length -- Minimum line length to consider
+
+        Returns:
+            Best vertical line found in quadrant, or None
+        """
+        if lines is None or len(lines) == 0 or quadrant is None:
+            return None
+
+        # Filter lines inside quadrant
+        quad_lines = self.filter_lines_by_polygon(lines, quadrant, require_full=True)
+
+        if quad_lines is None or len(quad_lines) == 0:
+            return None
+
+        # Use filter_by_angle to separate vertical and horizontal
+        vert, horiz = self.filter_by_angle(quad_lines, tol_deg=10)
+
+        # We want the vertical lines
+        if vert is None or len(vert) == 0:
+            return None
+
+        # Filter by minimum length
+        vert = self.filter_by_length(vert, min_length=min_length)
+
+        if vert is None or len(vert) == 0:
+            return None
+
+        # Return the longest vertical line
+        best_line = max(vert, key=lambda line: self._line_length(line))
+        return self.elongate_line(best_line, length=200)
 
     def find_stop_line_in_cone(self, lines, cone, min_length: float = 30.0):
         """
@@ -1720,7 +1831,7 @@ class IntersectionDetector(SmartyNode):
         image = self._blur_roi_top(
             image, ksize=(22, 22), sigmaX=0, do_close=True, close_kernel=(25, 3)
         )
-        cat_eye_left, cat_eye_right = self.calculate_cat_eye(image)
+        q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
         # normalize detected lines to canonical numpy (1,4) arrays
@@ -1756,18 +1867,18 @@ class IntersectionDetector(SmartyNode):
             )
 
         lines = vert + horiz
-        # save short lines for stop line detection in cat eye
+        # save short lines for stop line detection in quadrants
 
-        # Detect stop lines in both cat_eye regions
-        stop_line_left = self.find_stop_line_in_cat_eye(lines, cat_eye_left)
-        stop_line_right = self.find_stop_line_in_cat_eye(lines, cat_eye_right)
+        # Detect stop lines using ROI quadrants (Q1 for left, Q3 for right)
+        stop_line_left = self.find_line_in_quadrant(lines, q1)
+        stop_line_right = self.find_line_in_quadrant(lines, q4)
 
         label_stop_line_left = None
         if stop_line_left is not None:
             (
                 stop_dotted_left,
                 gap_count_left,
-                _,
+                white_ratio_left,
                 _,
             ) = self.is_line_dotted_by_gap_detection(
                 stop_line_left,
@@ -1776,18 +1887,24 @@ class IntersectionDetector(SmartyNode):
                 length_extend=1.2,
                 min_gap_count=3,
             )
-            label_stop_line_left = (
-                f"STOP_LEFT DOTTED (gaps={gap_count_left})"
-                if stop_dotted_left
-                else f"STOP_LEFT SOLID (gaps={gap_count_left})"
-            )
+            # Validate: Check if dotted or solid with appropriate thresholds
+            # Dotted: wr >= 3.5, Solid: wr >= 8
+            min_wr = 3 if stop_dotted_left else 8
+            if white_ratio_left >= min_wr:
+                label_stop_line_left = (
+                    f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.3f})"
+                    if stop_dotted_left
+                    else f"STOP_LEFT SOLID (g={gap_count_left} wr={white_ratio_left:.3f})"
+                )
+            else:
+                stop_line_left = None
 
         label_stop_line_right = None
         if stop_line_right is not None:
             (
                 stop_dotted_right,
                 gap_count_right,
-                _,
+                white_ratio_right,
                 _,
             ) = self.is_line_dotted_by_gap_detection(
                 stop_line_right,
@@ -1796,11 +1913,17 @@ class IntersectionDetector(SmartyNode):
                 length_extend=1.2,
                 min_gap_count=3,
             )
-            label_stop_line_right = (
-                f"STOP_RIGHT DOTTED (gaps={gap_count_right})"
-                if stop_dotted_right
-                else f"STOP_RIGHT SOLID (gaps={gap_count_right})"
-            )
+            # Validate: Check if dotted or solid with appropriate thresholds
+            # Dotted: wr >= 3.5, Solid: wr >= 8
+            min_wr = 3 if stop_dotted_right else 8
+            if white_ratio_right >= min_wr:
+                label_stop_line_right = (
+                    f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.3f})"
+                    if stop_dotted_right
+                    else f"STOP_RIGHT SOLID (g={gap_count_right} wr={white_ratio_right:.3f})"
+                )
+            else:
+                stop_line_right = None
 
         lines = self.filter_by_length(lines, min_length=100)
 
@@ -1825,18 +1948,30 @@ class IntersectionDetector(SmartyNode):
                     ego_line_long, image, min_rel=0.5, max_rel=0.75
                 )
 
-                ego_dotted, ego_gap_count, _, _ = self.is_line_dotted_by_gap_detection(
+                (
+                    ego_dotted,
+                    ego_gap_count,
+                    wr_ego,
+                    _,
+                ) = self.is_line_dotted_by_gap_detection(
                     clipped_ego,
                     image,
                     box_half_width=22,
                     length_extend=1.2,
                     min_gap_count=3,
                 )
-                label_ego = (
-                    f"EGO DOTTED (gaps={ego_gap_count})"
-                    if ego_dotted
-                    else f"EGO SOLID (gaps={ego_gap_count})"
-                )
+                # Validate: Check if dotted or solid with appropriate thresholds
+                # Dotted: wr >= 5, Solid: wr >= 8
+                min_wr = 5 if ego_dotted else 8
+                if wr_ego >= min_wr:
+                    label_ego = (
+                        f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.3f})"
+                        if ego_dotted
+                        else f"EGO SOLID (g={ego_gap_count} wr={wr_ego:.3f})"
+                    )
+                else:
+                    label_ego = None
+                    clipped_ego = None
 
                 if clipped_ego is None:
                     ego_line_long = None
@@ -1850,25 +1985,37 @@ class IntersectionDetector(SmartyNode):
                     opp_line_long, image, min_rel=0.15, max_rel=0.4
                 )
 
-                opp_dotted, opp_gap_count, _, _ = self.is_line_dotted_by_gap_detection(
+                (
+                    opp_dotted,
+                    opp_gap_count,
+                    wr_opp,
+                    _,
+                ) = self.is_line_dotted_by_gap_detection(
                     clipped_opp,
                     image,
                     box_half_width=22,
                     length_extend=1.2,
                     min_gap_count=3,
                 )
-                label_opp = (
-                    f"OPP DOTTED (gaps={opp_gap_count})"
-                    if opp_dotted
-                    else f"OPP SOLID (gaps={opp_gap_count})"
-                )
+                # Validate: Check if dotted or solid with appropriate thresholds
+                # Dotted: wr >= 5, Solid: wr >= 8
+                min_wr = 5 if opp_dotted else 8
+                if wr_opp >= min_wr:
+                    label_opp = (
+                        f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.3f})"
+                        if opp_dotted
+                        else f"OPP SOLID (g={opp_gap_count} wr={wr_opp:.3f})"
+                    )
+                else:
+                    label_opp = None
+                    clipped_opp = None
 
                 if clipped_opp is None:
                     opp_line_long = None
                 else:
                     opp_line_long = clipped_opp
 
-            if ego_line is not None and opp_line is not None:
+            if ego_line_long is not None and opp_line_long is not None:
                 pair_plausible = self.check_plausibility_horizontal_line_pair(
                     opp_line_long, ego_line_long, crossing_center
                 )
@@ -1946,9 +2093,21 @@ class IntersectionDetector(SmartyNode):
             pair_plausible=pair_plausible,
             label=label_ego,
             label2=label_opp,
-            cat_eye_left=cat_eye_left,
-            cat_eye_right=cat_eye_right,
         )
+
+        # Draw ROI quadrants
+        debug_image = self._draw_quadrants(
+            debug_image, q1, q2, q3, q4, color=(100, 100, 100), thickness=1
+        )
+
+        # Draw detected stop lines (left from Q1, right from Q3)
+        if stop_line_left is not None:
+            x1, y1, x2, y2 = [int(v) for v in stop_line_left[0]]
+            cv2.line(debug_image, (x1, y1), (x2, y2), VIOLET, 2)
+
+        if stop_line_right is not None:
+            x1, y1, x2, y2 = [int(v) for v in stop_line_right[0]]
+            cv2.line(debug_image, (x1, y1), (x2, y2), VIOLET, 2)
 
         # Draw stop line labels if present
         y_offset = 20
