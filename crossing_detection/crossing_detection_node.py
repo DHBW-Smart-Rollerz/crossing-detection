@@ -209,9 +209,13 @@ class IntersectionDetector(SmartyNode):
         cl_vert_left=None,
         ego_line_long=None,
         opp_line_long=None,
+        stop_line_left=None,
+        stop_line_right=None,
         pair_plausible=False,
         label=None,
         label2=None,
+        cat_eye_left=None,
+        cat_eye_right=None,
     ):
         """
         Draw all debug overlays at once on a provided image.
@@ -223,6 +227,16 @@ class IntersectionDetector(SmartyNode):
 
         if vert is not None:
             image = self._draw_lines(image, vert, color=RED)
+
+        # Draw cat_eye regions if present
+        if cat_eye_left is not None:
+            image = self._draw_cat_eye(
+                cat_eye_left, image, color=(255, 165, 0), thickness=2
+            )
+        if cat_eye_right is not None:
+            image = self._draw_cat_eye(
+                cat_eye_right, image, color=(255, 165, 0), thickness=2
+            )
 
         # crossing center markers
         if crossing_center is not None:
@@ -268,6 +282,25 @@ class IntersectionDetector(SmartyNode):
                     [opp_line_long],
                     color=GREEN if pair_plausible else PINK,
                     thickness=6,
+                )
+        except Exception:
+            pass
+
+        # stop lines (orthogonal to ego lane)
+        try:
+            if stop_line_right is not None:
+                image = self._draw_lines(
+                    image,
+                    [stop_line_right],
+                    color=CYAN,
+                    thickness=4,
+                )
+            if stop_line_left is not None:
+                image = self._draw_lines(
+                    image,
+                    [stop_line_left],
+                    color=CYAN,
+                    thickness=4,
                 )
         except Exception:
             pass
@@ -1410,40 +1443,172 @@ class IntersectionDetector(SmartyNode):
 
         return True
 
-    def calculate_cones(
-        self,
-        image,
-    ):
+    def calculate_cat_eye(self, image):
         """
-        Generate cones.
+        Generate two cat's eye shapes (diamonds) for left and right stop line detection.
+
+        The cat's eyes focus detection on two regions across the ROI width:
+        - cat_eye_left (at ~0.3 of ROI width): detects left stop lines
+        - cat_eye_right (at ~0.7 of ROI width): detects right stop lines
 
         Arguments:
-            image -- _description_
+            image -- Input image
 
         Returns:
-            _description_
+            Tuple of (cat_eye_left, cat_eye_right), each as a list of 4 points:
+                      [top_point, right_point, bottom_point, left_point]
         """
         [xs, xe, ys, ye] = self.get_roi_bbox(image.shape)
-        cone_start_point = (int(xs + xe * 0.75), ye)
-        cone_end_point = (int(xs + xe * 0.75), ys)
-        cone_arm_left_point = (cone_end_point[0] - 85, cone_end_point[1])
-        cone_arm_right_point = (cone_end_point[0] + 85, cone_end_point[1])
 
-        cone_right = [cone_start_point, cone_arm_left_point, cone_arm_right_point]
+        # ROI dimensions
+        roi_width = xe - xs
+        roi_height = ye - ys
+        roi_center_y = ys + roi_height / 2.0
 
-        cone_start_point = (int(xs + xe * 0.21), ys)
-        cone_end_point = (int(xs + xe * 0.21), ye)
-        cone_arm_left_point = (cone_end_point[0] - 85, cone_end_point[1])
-        cone_arm_right_point = (cone_end_point[0] + 85, cone_end_point[1])
+        # Cat's eye left (at ~0.25 of ROI width) for left stop line
+        x_left = int(xs + roi_width * 0.25)
+        top_point_left = (x_left - int(roi_width * 0.10), int(roi_center_y))
+        right_point_left = (x_left, int(ys + roi_height * 0.18))
+        bottom_point_left = (x_left + int(roi_width * 0.10), int(roi_center_y))
+        left_point_left = (x_left, int(ys + roi_height * 0.81))
+        cat_eye_left = [
+            top_point_left,
+            right_point_left,
+            bottom_point_left,
+            left_point_left,
+        ]
 
-        cone_left = [cone_start_point, cone_arm_left_point, cone_arm_right_point]
+        # Cat's eye right (at ~0.7 of ROI width) for right stop line
+        x_right = int(xs + roi_width * 0.73)
+        top_point_right = (x_right - int(roi_width * 0.10), int(roi_center_y))
+        right_point_right = (x_right, int(ys + roi_height * 0.18))
+        bottom_point_right = (x_right + int(roi_width * 0.10), int(roi_center_y))
+        left_point_right = (x_right, int(ys + roi_height * 0.81))
+        cat_eye_right = [
+            top_point_right,
+            right_point_right,
+            bottom_point_right,
+            left_point_right,
+        ]
 
-        return cone_left, cone_right
+        return cat_eye_left, cat_eye_right
+
+    def find_stop_line_in_cone(self, lines, cone, min_length: float = 30.0):
+        """
+        Find the longest vertical line inside a cone region.
+
+        Vertical lines are perpendicular to the ego lane (stop lines).
+        This is more robust than looking for multiple small lines.
+
+        Arguments:
+            lines -- List of detected line segments
+            cone -- Cone region [start_point, arm_left_point, arm_right_point]
+            min_length -- Minimum line length to consider
+
+        Returns:
+            Best vertical line found in cone, or None
+        """
+        if lines is None or len(lines) == 0 or cone is None:
+            return None
+
+        # Filter lines inside cone
+        cone_lines = self.filter_lines_by_cone(lines, cone, require_full=True)
+
+        if cone_lines is None or len(cone_lines) == 0:
+            return None
+
+        # Use existing filter_by_angle to separate vertical and horizontal
+        vert, horiz = self.filter_by_angle(cone_lines, tol_deg=10)
+
+        # We want the vertical lines (perpendicular to ego lane)
+        if vert is None or len(vert) == 0:
+            return None
+
+        # Filter by minimum length
+        vert = self.filter_by_length(vert, min_length=min_length)
+
+        if vert is None or len(vert) == 0:
+            return None
+
+        # Return the longest vertical line (most likely the stop line)
+        best_line = max(vert, key=lambda line: self._line_length(line))
+        return self.elongate_line(best_line, length=180)
+
+    def find_stop_line_in_cat_eye(self, lines, cat_eye, min_length: float = 30.0):
+        """
+        Find the longest vertical line inside the cat_eye diamond region.
+
+        Vertical lines are perpendicular to the ego lane (stop lines).
+
+        Arguments:
+            lines -- List of detected line segments
+            cat_eye -- Cat_eye region [top_point, right_point, bottom_point, left_point]
+            min_length -- Minimum line length to consider
+
+        Returns:
+            Best vertical line found in cat_eye, or None
+        """
+        if lines is None or len(lines) == 0 or cat_eye is None:
+            return None
+
+        # Filter lines inside cat_eye polygon
+        cat_eye_lines = self.filter_lines_by_polygon(lines, cat_eye, require_full=True)
+
+        if cat_eye_lines is None or len(cat_eye_lines) == 0:
+            return None
+
+        # Use existing filter_by_angle to separate vertical and horizontal
+        vert, horiz = self.filter_by_angle(cat_eye_lines, tol_deg=10)
+
+        # We want the vertical lines (perpendicular to ego lane)
+        if vert is None or len(vert) == 0:
+            return None
+
+        # Filter by minimum length
+        vert = self.filter_by_length(vert, min_length=min_length)
+
+        if vert is None or len(vert) == 0:
+            return None
+
+        # Return the longest vertical line (most likely the stop line)
+        best_line = max(vert, key=lambda line: self._line_length(line))
+        return self.elongate_line(best_line, length=180)
+
+    def _line_length(self, line):
+        """Calculate the Euclidean length of a line segment."""
+        x1, y1, x2, y2 = line[0]
+        return math.hypot(x2 - x1, y2 - y1)
 
     def _draw_cone(self, cone, image):
         [cone_start_point, cone_arm_left_point, cone_arm_right_point] = cone
         cv2.line(image, cone_arm_left_point, cone_start_point, (0, 255, 0), 1)
         cv2.line(image, cone_arm_right_point, cone_start_point, (0, 255, 0), 1)
+
+        return image
+
+    def _draw_cat_eye(self, cat_eye, image, color=(255, 165, 0), thickness=2):
+        """
+        Draw the cat_eye diamond shape on the image.
+
+        Arguments:
+            cat_eye -- List of 4 points [top, right, bottom, left]
+            image -- Image to draw on
+            color -- Color for the lines (BGR format, default orange)
+            thickness -- Line thickness
+
+        Returns:
+            Image with cat_eye drawn
+        """
+        if cat_eye is None or len(cat_eye) < 4:
+            return image
+
+        top, right, bottom, left = cat_eye
+
+        # Draw the diamond: top -> right -> bottom -> left -> top
+        cv2.line(image, top, right, color, thickness)
+        cv2.line(image, right, bottom, color, thickness)
+        cv2.line(image, bottom, left, color, thickness)
+        cv2.line(image, left, top, color, thickness)
 
         return image
 
@@ -1494,6 +1659,49 @@ class IntersectionDetector(SmartyNode):
 
         return filtered
 
+    def filter_lines_by_polygon(self, lines, polygon, require_full=True):
+        """
+        Filter lines to those inside a polygon region.
+
+        Arguments:
+            lines -- iterable of lines (any accepted format by _normalize_line)
+            polygon -- list of points defining the polygon (e.g., cat_eye)
+            require_full -- if True (default) keep only lines where both
+                            endpoints are inside. If False, keep lines with
+                            at least one endpoint inside.
+
+        Returns:
+            List of normalized lines (each as numpy array shape (1,4)).
+        """
+        if not polygon or lines is None:
+            return []
+
+        # Convert polygon points to numpy array for cv2.pointPolygonTest
+        try:
+            poly = np.array(polygon, dtype=np.int32)
+        except Exception:
+            return []
+
+        filtered = []
+        for ln in lines:
+            nl = self._normalize_line(ln)
+            if nl is None:
+                continue
+            x1, y1, x2, y2 = nl[0].astype(int)
+
+            # pointPolygonTest returns >0 inside, 0 on edge, <0 outside
+            d1 = cv2.pointPolygonTest(poly, (int(x1), int(y1)), False)
+            d2 = cv2.pointPolygonTest(poly, (int(x2), int(y2)), False)
+
+            if require_full:
+                if d1 >= 0 and d2 >= 0:
+                    filtered.append(nl)
+            else:
+                if d1 >= 0 or d2 >= 0:
+                    filtered.append(nl)
+
+        return filtered
+
     def pipeline(self, image):
         """
         Complete processing pipeline for intersection detection.
@@ -1512,7 +1720,7 @@ class IntersectionDetector(SmartyNode):
         image = self._blur_roi_top(
             image, ksize=(22, 22), sigmaX=0, do_close=True, close_kernel=(25, 3)
         )
-        cone_left, cone_right = self.calculate_cones(image)
+        cat_eye_left, cat_eye_right = self.calculate_cat_eye(image)
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
         # normalize detected lines to canonical numpy (1,4) arrays
@@ -1548,47 +1756,51 @@ class IntersectionDetector(SmartyNode):
             )
 
         lines = vert + horiz
-        # save short lines for cone phase later
+        # save short lines for stop line detection in cat eye
 
-        # find vertical lines
-        cone_lines = self.filter_lines_by_cone(lines, cone_right, require_full=True)
-        cl_vert, cl_horiz = self.filter_by_angle(cone_lines, tol_deg=5)
-        cl_vert = self.fuse_similar_lines(cl_vert, center_dist_tol=13)
+        # Detect stop lines in both cat_eye regions
+        stop_line_left = self.find_stop_line_in_cat_eye(lines, cat_eye_left)
+        stop_line_right = self.find_stop_line_in_cat_eye(lines, cat_eye_right)
 
-        cl_vert = self.filter_by_length(cl_vert, min_length=20, max_length=85)
-        l = len(cl_vert)
-        self.get_logger().info(str(l))
+        label_stop_line_left = None
+        if stop_line_left is not None:
+            (
+                stop_dotted_left,
+                gap_count_left,
+                _,
+                _,
+            ) = self.is_line_dotted_by_gap_detection(
+                stop_line_left,
+                image,
+                box_half_width=22,
+                length_extend=1.2,
+                min_gap_count=3,
+            )
+            label_stop_line_left = (
+                f"STOP_LEFT DOTTED (gaps={gap_count_left})"
+                if stop_dotted_left
+                else f"STOP_LEFT SOLID (gaps={gap_count_left})"
+            )
 
-        def calculate_distance_between(lines):
-            amount_of_lines = len(lines)
-            if amount_of_lines - 1 <= 0:
-                return
-            _sum = 0
-            for i in range(amount_of_lines - 1):
-                x11, y11, x21, y21 = lines[i][0]
-                x12, y12, x22, y22 = lines[i + 1][0]
-                diff_x = abs(x12 - x11)
-                _sum += diff_x
-
-            return _sum / (amount_of_lines - 1)
-
-        d = calculate_distance_between(cl_vert)
-        label_dotted_right = None
-        if len(cl_vert) >= 4 and 11 <= d <= 15:
-            label_dotted_right = f"DOTTED_RIGHT ({l} - {d})"
-
-        cone_lines = self.filter_lines_by_cone(lines, cone_left, require_full=True)
-        cl_vert_left, cl_horiz = self.filter_by_angle(cone_lines, tol_deg=5)
-        cl_vert_left = self.fuse_similar_lines(cl_vert_left, center_dist_tol=13)
-
-        cl_vert_left = self.filter_by_length(cl_vert_left, min_length=20, max_length=85)
-        l = len(cl_vert_left)
-        self.get_logger().info(str(l))
-
-        d = calculate_distance_between(cl_vert_left)
-        label_dotted_left = None
-        if len(cl_vert_left) >= 4 and 11 <= d <= 15:
-            label_dotted_left = f"DOTTED_LEFT ({l} - {d})"
+        label_stop_line_right = None
+        if stop_line_right is not None:
+            (
+                stop_dotted_right,
+                gap_count_right,
+                _,
+                _,
+            ) = self.is_line_dotted_by_gap_detection(
+                stop_line_right,
+                image,
+                box_half_width=22,
+                length_extend=1.2,
+                min_gap_count=3,
+            )
+            label_stop_line_right = (
+                f"STOP_RIGHT DOTTED (gaps={gap_count_right})"
+                if stop_dotted_right
+                else f"STOP_RIGHT SOLID (gaps={gap_count_right})"
+            )
 
         lines = self.filter_by_length(lines, min_length=100)
 
@@ -1614,7 +1826,11 @@ class IntersectionDetector(SmartyNode):
                 )
 
                 ego_dotted, ego_gap_count, _, _ = self.is_line_dotted_by_gap_detection(
-                    clipped_ego, image, box_half_width=22, length_extend=1.2
+                    clipped_ego,
+                    image,
+                    box_half_width=22,
+                    length_extend=1.2,
+                    min_gap_count=3,
                 )
                 label_ego = (
                     f"EGO DOTTED (gaps={ego_gap_count})"
@@ -1635,7 +1851,11 @@ class IntersectionDetector(SmartyNode):
                 )
 
                 opp_dotted, opp_gap_count, _, _ = self.is_line_dotted_by_gap_detection(
-                    clipped_opp, image, box_half_width=22, length_extend=1.2
+                    clipped_opp,
+                    image,
+                    box_half_width=22,
+                    length_extend=1.2,
+                    min_gap_count=3,
                 )
                 label_opp = (
                     f"OPP DOTTED (gaps={opp_gap_count})"
@@ -1715,33 +1935,39 @@ class IntersectionDetector(SmartyNode):
             vert=vert,
             horiz=None,
             crossing_center=crossing_center,
-            cone_left=cone_left,
-            cone_right=cone_right,
-            cl_vert=cl_vert,
-            cl_vert_left=cl_vert_left,
+            cone_left=None,
+            cone_right=None,
+            cl_vert=None,
+            cl_vert_left=None,
             ego_line_long=ego_line_long,
             opp_line_long=opp_line_long,
+            stop_line_left=None,
+            stop_line_right=None,
             pair_plausible=pair_plausible,
             label=label_ego,
             label2=label_opp,
+            cat_eye_left=cat_eye_left,
+            cat_eye_right=cat_eye_right,
         )
 
-        # Draw additional dotted line labels if present
-        if label_dotted_right is not None:
+        # Draw stop line labels if present
+        y_offset = 20
+        if label_stop_line_left is not None:
             cv2.putText(
                 debug_image,
-                label_dotted_right,
-                (0, 20),
+                label_stop_line_left,
+                (0, y_offset),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 GREEN,
             )
+            y_offset += 25
 
-        if label_dotted_left is not None:
+        if label_stop_line_right is not None:
             cv2.putText(
                 debug_image,
-                label_dotted_left,
-                (0, 45),
+                label_stop_line_right,
+                (0, y_offset),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 GREEN,
