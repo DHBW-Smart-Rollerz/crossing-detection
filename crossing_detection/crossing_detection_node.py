@@ -21,7 +21,7 @@ DEBUG = True
 RED = (0, 0, 255)
 GREEN = (0, 255, 0)
 BLUE = (255, 0, 0)
-YELLOW = (0, 255, 255)
+YELLOW = (255, 255, 0)
 MAGENTA = (255, 0, 255)
 
 # Bright colors
@@ -105,6 +105,9 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             # fallback default
             self.compute_crossing_center = True
+
+        # Debug overlay storage for line detection visualization
+        self.debug_overlay_images = []
 
     @property
     def image_path(self) -> str:
@@ -202,6 +205,7 @@ class IntersectionDetector(SmartyNode):
         filtered_lines=None,
         vert=None,
         horiz=None,
+        joined_lines=None,
         crossing_center=None,
         cone_left=None,
         cone_right=None,
@@ -225,6 +229,10 @@ class IntersectionDetector(SmartyNode):
 
         if vert is not None:
             image = self._draw_lines(image, vert, color=GOLD)
+
+        # draw joined lines in yellow
+        if joined_lines is not None:
+            image = self._draw_lines(image, joined_lines, color=YELLOW, thickness=3)
 
         # crossing center markers
         if crossing_center is not None:
@@ -363,7 +371,6 @@ class IntersectionDetector(SmartyNode):
         Returns:
             Image with edges detected.
         """
-        img = cv2.GaussianBlur(img, (5, 5), 0)
         img = cv2.Canny(img, 50, 50)
         # IntersectionDetector.show_image("Canny", img)
         return img
@@ -425,6 +432,74 @@ class IntersectionDetector(SmartyNode):
                     ckx, cky = int(close_kernel[0]), int(close_kernel[1])
                 except Exception:
                     ckx, cky = 20, 3
+                # ensure kernel dimensions >=1
+                ckx = max(1, ckx)
+                cky = max(1, cky)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (ckx, cky))
+                processed = cv2.morphologyEx(blurred, cv2.MORPH_CLOSE, kernel)
+                out[top:bottom, left:right] = processed
+            else:
+                out[top:bottom, left:right] = blurred
+
+        return out
+
+    def _blur_roi_bottom(
+        self, image, ksize=(5, 5), sigmaX=0, do_close=True, close_kernel=(10, 3)
+    ):
+        """
+        Apply a lighter Gaussian blur to the lower half of the configured ROI.
+
+        This helps reduce noise in the lower ROI area while preserving
+        edge details better than the top blur.
+
+        Arguments:
+            image -- BGR image (numpy array)
+            ksize -- Gaussian kernel size (must be odd numbers)
+            sigmaX -- Gaussian sigma in X direction
+            do_close -- whether to perform morphological closing
+            close_kernel -- kernel size for morphological closing
+
+        Returns:
+            A copy of the image with the ROI bottom half lightly blurred.
+        """
+        if image is None:
+            return image
+
+        h, w = image.shape[:2]
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+
+        # clamp coords
+        roi_left = max(0, min(w - 1, int(roi_left)))
+        roi_right = max(0, min(w, int(roi_right)))
+        roi_top = max(0, min(h - 1, int(roi_top)))
+        roi_bottom = max(0, min(h, int(roi_bottom)))
+
+        # bottom half of ROI
+        bottom_half_start = roi_top + (roi_bottom - roi_top) // 2
+
+        # ensure valid box
+        top = max(0, bottom_half_start)
+        bottom = max(top, min(h, roi_bottom))
+        left = max(0, roi_left)
+        right = max(0, min(w, roi_right))
+
+        out = image.copy()
+        if bottom > top and right > left:
+            patch = out[top:bottom, left:right]
+            # ensure odd kernel sizes for Gaussian
+            kx, ky = ksize
+            if kx % 2 == 0:
+                kx += 1
+            if ky % 2 == 0:
+                ky += 1
+            blurred = cv2.GaussianBlur(patch, (kx, ky), sigmaX)
+
+            # optionally perform morphological closing
+            if do_close:
+                try:
+                    ckx, cky = int(close_kernel[0]), int(close_kernel[1])
+                except Exception:
+                    ckx, cky = 10, 3
                 # ensure kernel dimensions >=1
                 ckx = max(1, ckx)
                 cky = max(1, cky)
@@ -598,6 +673,148 @@ class IntersectionDetector(SmartyNode):
                 res.append(line)
 
         return res
+
+    def fuse_nearby_lines(
+        self, lines, distance_threshold: float = 20.0, angle_tolerance: float = 10.0
+    ):
+        """
+        Fuse lines that are geometrically close to each other.
+
+        Groups lines that are near each other and have similar angles,
+        then merges them into single lines. This helps join segments
+        belonging to the same stop line.
+
+        Arguments:
+            lines -- List of lines as [[x1, y1, x2, y2]]
+            distance_threshold -- Max distance between line endpoints to fuse
+            angle_tolerance -- Max angle difference (degrees) to fuse
+
+        Returns:
+            List of fused lines
+        """
+        if lines is None or len(lines) == 0:
+            return []
+
+        # Normalize and extract line data
+        line_data = []
+        for line in lines:
+            nl = self._normalize_line(line)
+            if nl is None:
+                continue
+            x1, y1, x2, y2 = nl[0].astype(float)
+            dx = x2 - x1
+            dy = y2 - y1
+            line_len = math.hypot(dx, dy)
+            if line_len < 1e-3:
+                continue
+            # Normalize angle to [0, 180)
+            angle = math.degrees(math.atan2(dy, dx))
+            angle_norm = (angle + 360.0) % 180.0
+            line_data.append(
+                {
+                    "line": line,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "angle": angle_norm,
+                    "length": line_len,
+                    "used": False,
+                }
+            )
+
+        if not line_data:
+            return []
+
+        fused_lines = []
+
+        # Greedy clustering: start with each unused line
+        for i, line_i in enumerate(line_data):
+            if line_i["used"]:
+                continue
+
+            # Start a new cluster with this line
+            cluster = [line_i]
+            line_i["used"] = True
+
+            # Find all nearby lines
+            for j in range(i + 1, len(line_data)):
+                line_j = line_data[j]
+                if line_j["used"]:
+                    continue
+
+                # Check if angles are similar
+                angle_diff = abs(line_i["angle"] - line_j["angle"])
+                angle_diff = min(angle_diff, 180.0 - angle_diff)
+                if angle_diff > angle_tolerance:
+                    continue
+
+                # Check if any endpoint of line_j is close to any endpoint
+                # of any line in the cluster
+                is_close = False
+                for line_c in cluster:
+                    # Distance from j's endpoints to i's endpoints
+                    d_j1_to_i1 = math.hypot(
+                        line_j["x1"] - line_c["x1"],
+                        line_j["y1"] - line_c["y1"],
+                    )
+                    d_j1_to_i2 = math.hypot(
+                        line_j["x1"] - line_c["x2"],
+                        line_j["y1"] - line_c["y2"],
+                    )
+                    d_j2_to_i1 = math.hypot(
+                        line_j["x2"] - line_c["x1"],
+                        line_j["y2"] - line_c["y1"],
+                    )
+                    d_j2_to_i2 = math.hypot(
+                        line_j["x2"] - line_c["x2"],
+                        line_j["y2"] - line_c["y2"],
+                    )
+                    min_dist = min(d_j1_to_i1, d_j1_to_i2, d_j2_to_i1, d_j2_to_i2)
+                    if min_dist <= distance_threshold:
+                        is_close = True
+                        break
+
+                if is_close:
+                    cluster.append(line_j)
+                    line_j["used"] = True
+
+            # Fuse cluster into single line
+            if cluster:
+                all_x = []
+                all_y = []
+                for line_c in cluster:
+                    all_x.extend([line_c["x1"], line_c["x2"]])
+                    all_y.extend([line_c["y1"], line_c["y2"]])
+
+                # Find extreme points
+                # Project all points onto the line direction
+                angle = cluster[0]["angle"]
+                angle_rad = math.radians(angle)
+                cos_a = math.cos(angle_rad)
+                sin_a = math.sin(angle_rad)
+
+                projections = []
+                for x, y in zip(all_x, all_y):
+                    proj = x * cos_a + y * sin_a
+                    projections.append((proj, x, y))
+
+                projections.sort()
+                min_proj = projections[0]
+                max_proj = projections[-1]
+
+                x1_fused = min_proj[1]
+                y1_fused = min_proj[2]
+                x2_fused = max_proj[1]
+                y2_fused = max_proj[2]
+
+                fused_line = np.array(
+                    [[[x1_fused, y1_fused, x2_fused, y2_fused]]],
+                    dtype=np.float32,
+                )
+                fused_lines.append(fused_line)
+
+        return fused_lines
 
     def line_segment_detector(self, img):
         """
@@ -1095,10 +1312,20 @@ class IntersectionDetector(SmartyNode):
             if in_gap and gap_length >= gap_size_min:
                 gaps += 1
 
-            # white ratio: how much of the box is white
-            white_ratio = float(np.sum(white_per_col) / len(white_per_col))
+            # white ratio: percentage of white pixels in the bounding box
+            # white_per_col is array of white pixel counts per column
+            # crop_h is the height of the box
+            # total white pixels = sum of white_per_col
+            # total pixels in box = crop_h * len(white_per_col)
+            total_white_pixels = float(np.sum(white_per_col))
+            total_pixels = float(crop_h * len(white_per_col))
+            if total_pixels > 0:
+                white_ratio = (total_white_pixels / total_pixels) * 100.0
+            else:
+                white_ratio = 0.0
 
             is_dotted = gaps >= min_gap_count
+
             return bool(is_dotted), int(gaps), float(white_ratio), 1
         except Exception:
             return False, 0, 0.0, 0
@@ -1582,7 +1809,7 @@ class IntersectionDetector(SmartyNode):
             return None
 
         # Filter lines inside quadrant
-        quad_lines = self.filter_lines_by_polygon(lines, quadrant, require_full=True)
+        quad_lines = self.filter_lines_by_polygon(lines, quadrant, require_full=False)
 
         if quad_lines is None or len(quad_lines) == 0:
             return None
@@ -1831,6 +2058,12 @@ class IntersectionDetector(SmartyNode):
         image = self._blur_roi_top(
             image, ksize=(22, 22), sigmaX=0, do_close=True, close_kernel=(25, 3)
         )
+
+        # apply lighter blur to the lower half of the ROI
+        image = self._blur_roi_bottom(
+            image, ksize=(5, 5), sigmaX=0, do_close=True, close_kernel=(10, 3)
+        )
+
         q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
@@ -1843,7 +2076,20 @@ class IntersectionDetector(SmartyNode):
         filtered_lines = self.filter_by_roi(filtered_lines, image.shape)
         # image = self._draw_lines(image, filtered_lines, color=GREEN)
 
-        vert, horiz = self.filter_by_angle(filtered_lines)
+        # Fuse similar lines that belong to the same stop line
+        fused_lines = self.fuse_similar_lines(
+            filtered_lines, angle_tol_deg=15, center_dist_tol=100
+        )
+
+        fused_lines = self.fuse_similar_lines(
+            fused_lines, angle_tol_deg=5, center_dist_tol=120
+        )
+
+        fused_lines = self.fuse_similar_lines(
+            fused_lines, angle_tol_deg=5, center_dist_tol=25
+        )
+
+        vert, horiz = self.filter_by_angle(fused_lines, tol_deg=5)
 
         # compute crossing center optionally; if disabled, use ROI center
         crossing_center = None
@@ -1867,11 +2113,13 @@ class IntersectionDetector(SmartyNode):
             )
 
         lines = vert + horiz
+        lines = self.filter_by_length(lines, min_length=70)
+        fused_lines = lines
         # save short lines for stop line detection in quadrants
 
         # Detect stop lines using ROI quadrants (Q1 for left, Q3 for right)
         stop_line_left = self.find_line_in_quadrant(lines, q1)
-        stop_line_right = self.find_line_in_quadrant(lines, q4)
+        stop_line_right = self.find_line_in_quadrant(lines, q2)
 
         label_stop_line_left = None
         if stop_line_left is not None:
@@ -1888,13 +2136,13 @@ class IntersectionDetector(SmartyNode):
                 min_gap_count=3,
             )
             # Validate: Check if dotted or solid with appropriate thresholds
-            # Dotted: wr >= 3.5, Solid: wr >= 8
-            min_wr = 3 if stop_dotted_left else 8
+            # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
+            min_wr = 5.5 if stop_dotted_left else 20
             if white_ratio_left >= min_wr:
                 label_stop_line_left = (
-                    f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.3f})"
+                    f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.1f}%)"
                     if stop_dotted_left
-                    else f"STOP_LEFT SOLID (g={gap_count_left} wr={white_ratio_left:.3f})"
+                    else f"STOP_LEFT SOLID (g={gap_count_left} wr={white_ratio_left:.1f}%)"
                 )
             else:
                 stop_line_left = None
@@ -1914,13 +2162,13 @@ class IntersectionDetector(SmartyNode):
                 min_gap_count=3,
             )
             # Validate: Check if dotted or solid with appropriate thresholds
-            # Dotted: wr >= 3.5, Solid: wr >= 8
-            min_wr = 3 if stop_dotted_right else 8
+            # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
+            min_wr = 5.5 if stop_dotted_right else 20.0
             if white_ratio_right >= min_wr:
                 label_stop_line_right = (
-                    f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.3f})"
+                    f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.1f}%)"
                     if stop_dotted_right
-                    else f"STOP_RIGHT SOLID (g={gap_count_right} wr={white_ratio_right:.3f})"
+                    else f"STOP_RIGHT SOLID (g={gap_count_right} wr={white_ratio_right:.1f}%)"
                 )
             else:
                 stop_line_right = None
@@ -1957,17 +2205,17 @@ class IntersectionDetector(SmartyNode):
                     clipped_ego,
                     image,
                     box_half_width=22,
-                    length_extend=1.2,
+                    length_extend=1.1,
                     min_gap_count=3,
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
-                # Dotted: wr >= 5, Solid: wr >= 8
-                min_wr = 5 if ego_dotted else 8
+                # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
+                min_wr = 10.0 if ego_dotted else 22.0
                 if wr_ego >= min_wr:
                     label_ego = (
-                        f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.3f})"
+                        f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
                         if ego_dotted
-                        else f"EGO SOLID (g={ego_gap_count} wr={wr_ego:.3f})"
+                        else f"EGO SOLID (g={ego_gap_count} wr={wr_ego:.1f}%)"
                     )
                 else:
                     label_ego = None
@@ -1994,17 +2242,17 @@ class IntersectionDetector(SmartyNode):
                     clipped_opp,
                     image,
                     box_half_width=22,
-                    length_extend=1.2,
+                    length_extend=1.1,
                     min_gap_count=3,
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
-                # Dotted: wr >= 5, Solid: wr >= 8
-                min_wr = 5 if opp_dotted else 8
+                # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
+                min_wr = 10.0 if opp_dotted else 22.0
                 if wr_opp >= min_wr:
                     label_opp = (
-                        f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.3f})"
+                        f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.1f}%)"
                         if opp_dotted
-                        else f"OPP SOLID (g={opp_gap_count} wr={wr_opp:.3f})"
+                        else f"OPP SOLID (g={opp_gap_count} wr={wr_opp:.1f}%)"
                     )
                 else:
                     label_opp = None
@@ -2081,6 +2329,7 @@ class IntersectionDetector(SmartyNode):
             filtered_lines=None,
             vert=vert,
             horiz=None,
+            joined_lines=fused_lines,
             crossing_center=crossing_center,
             cone_left=None,
             cone_right=None,
@@ -2131,6 +2380,40 @@ class IntersectionDetector(SmartyNode):
                 0.5,
                 GREEN,
             )
+
+        # Composite debug overlay images onto final debug image
+        if True and len(self.debug_overlay_images) > 0:
+            # Add a title to show these are detection debug overlays
+            cv2.putText(
+                debug_image,
+                "Line Detection Debug Overlays (warped images):",
+                (10, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+            )
+            # Stack overlay images side-by-side or in a grid at bottom of image
+            overlay_height = debug_image.shape[0] // 3
+            overlay_width = debug_image.shape[1] // len(self.debug_overlay_images[:3])
+            y_start = int(debug_image.shape[0] * 0.6)
+            for i, overlay_img in enumerate(self.debug_overlay_images[:3]):
+                # Resize overlay to fit
+                resized = cv2.resize(
+                    overlay_img,
+                    (overlay_width, overlay_height),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                x_start = i * overlay_width
+                try:
+                    debug_image[
+                        y_start : y_start + overlay_height,
+                        x_start : x_start + overlay_width,
+                    ] = resized
+                except Exception:
+                    pass  # Skip if dimensions don't match
+            # Clear the list for next frame
+            self.debug_overlay_images.clear()
 
         # save debug image and return image + result list
         # IntersectionDetector.save_img_to_dir(
