@@ -2131,13 +2131,13 @@ class IntersectionDetector(SmartyNode):
             ) = self.is_line_dotted_by_gap_detection(
                 stop_line_left,
                 image,
-                box_half_width=22,
+                box_half_width=10,
                 length_extend=1.2,
                 min_gap_count=3,
             )
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-            min_wr = 5.5 if stop_dotted_left else 20
+            min_wr = 7.5 if stop_dotted_left else 20
             if white_ratio_left >= min_wr:
                 label_stop_line_left = (
                     f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.1f}%)"
@@ -2157,13 +2157,13 @@ class IntersectionDetector(SmartyNode):
             ) = self.is_line_dotted_by_gap_detection(
                 stop_line_right,
                 image,
-                box_half_width=22,
+                box_half_width=10,
                 length_extend=1.2,
                 min_gap_count=3,
             )
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-            min_wr = 5.5 if stop_dotted_right else 20.0
+            min_wr = 7.5 if stop_dotted_right else 20.0
             if white_ratio_right >= min_wr:
                 label_stop_line_right = (
                     f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.1f}%)"
