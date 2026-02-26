@@ -2,7 +2,6 @@ import math
 import os
 import time
 from enum import IntEnum
-from statistics import mode
 
 import cv2
 import cv_bridge
@@ -17,21 +16,21 @@ from timing import timer
 
 DEBUG = True
 
-# Color constants (BGR tuples)
-RED = (0, 0, 255)
+# Color constants (RGB tuples - will be converted to BGR via cv2.COLOR_RGB2BGR)
+RED = (255, 0, 0)
 GREEN = (0, 255, 0)
-BLUE = (255, 0, 0)
+BLUE = (0, 0, 255)
 YELLOW = (255, 255, 0)
 MAGENTA = (255, 0, 255)
 
 # Bright colors
-CYAN = (255, 255, 0)
-ORANGE = (0, 128, 255)
-LIME = (50, 255, 50)
-PINK = (255, 0, 180)
-VIOLET = (180, 50, 255)
-TURQUOISE = (255, 255, 100)
-GOLD = (0, 215, 255)
+CYAN = (0, 255, 255)
+ORANGE = (255, 165, 0)
+LIME = (0, 255, 0)
+PINK = (255, 192, 203)
+VIOLET = (148, 0, 211)
+TURQUOISE = (200, 230, 240)
+GOLD = (255, 215, 0)
 
 
 class LaneType(IntEnum):
@@ -81,6 +80,14 @@ class IntersectionDetector(SmartyNode):
                 "image_path": "resources/img/example.png",
                 "debug": False,
                 "compute_crossing_center": False,
+                # Sharpening parameters
+                "sharpen_enabled": True,
+                "sharpen_strength_top": 1.5,
+                "sharpen_strength_bottom": 1.0,
+                # Distortion enhancement parameters
+                "enhance_distorted_roi_enabled": True,
+                "enhance_distortion_kernel": 5,
+                "enhance_distortion_dilations": 1,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -106,8 +113,44 @@ class IntersectionDetector(SmartyNode):
             # fallback default
             self.compute_crossing_center = True
 
+        # Read sharpening parameters
+        try:
+            self.sharpen_enabled = self.get_parameter("sharpen_enabled").value
+            self.sharpen_strength_top = self.get_parameter("sharpen_strength_top").value
+            self.sharpen_strength_bottom = self.get_parameter(
+                "sharpen_strength_bottom"
+            ).value
+        except Exception:
+            # fallback defaults
+            self.sharpen_enabled = True
+            self.sharpen_strength_top = 1.5
+            self.sharpen_strength_bottom = 1.0
+
+        # Read distortion enhancement parameters
+        try:
+            self.enhance_distorted_roi_enabled = self.get_parameter(
+                "enhance_distorted_roi_enabled"
+            ).value
+            self.enhance_distortion_kernel = self.get_parameter(
+                "enhance_distortion_kernel"
+            ).value
+            self.enhance_distortion_dilations = self.get_parameter(
+                "enhance_distortion_dilations"
+            ).value
+        except Exception:
+            # fallback defaults
+            self.enhance_distorted_roi_enabled = True
+            self.enhance_distortion_kernel = 5
+            self.enhance_distortion_dilations = 1
+
         # Debug overlay storage for line detection visualization
         self.debug_overlay_images = []
+
+        # Crossing center with 4-frame hold and shift logic
+        self.detected_crossing_center = None  # newly detected center
+        self.active_crossing_center = None  # currently used center
+        self.crossing_center_frames = 0  # frame counter (0-3)
+        self.crossing_center_error = float("inf")  # error metric
 
     @property
     def image_path(self) -> str:
@@ -207,6 +250,7 @@ class IntersectionDetector(SmartyNode):
         horiz=None,
         joined_lines=None,
         crossing_center=None,
+        detected_corners=None,
         cone_left=None,
         cone_right=None,
         cl_vert=None,
@@ -224,8 +268,8 @@ class IntersectionDetector(SmartyNode):
         This keeps the detection logic separated from visualization.
         """
         # draw basic line sets
-        if transformed_lines is not None:
-            image = self._draw_lines(image, transformed_lines, color=MAGENTA)
+        # if transformed_lines is not None:
+        #    image = self._draw_lines(image, transformed_lines, color=MAGENTA)
 
         if vert is not None:
             image = self._draw_lines(image, vert, color=GOLD)
@@ -243,12 +287,143 @@ class IntersectionDetector(SmartyNode):
                 )
                 image = cv2.circle(
                     image,
-                    (int(crossing_center_pulled[0]), int(crossing_center_pulled[1])),
+                    (
+                        int(crossing_center_pulled[0]),
+                        int(crossing_center_pulled[1]),
+                    ),
                     8,
                     TURQUOISE,
                 )
             except Exception:
                 pass
+
+        # draw detected corners as pink and orange crosses
+        if detected_corners is not None and len(detected_corners) > 0:
+            try:
+                # Calculate angles at each corner
+                sorted_corners, interior_angles = self.compute_corner_angles(
+                    detected_corners
+                )
+
+                # Alternate between PINK and ORANGE for visual distinction
+                for i, corner in enumerate(detected_corners):
+                    x, y = corner
+                    color = PINK if i % 2 == 0 else ORANGE
+                    # Draw a cross at corner position
+                    cross_size = 8
+                    image = cv2.line(
+                        image,
+                        (x - cross_size, y),
+                        (x + cross_size, y),
+                        color,
+                        2,
+                    )
+                    image = cv2.line(
+                        image,
+                        (x, y - cross_size),
+                        (x, y + cross_size),
+                        color,
+                        2,
+                    )
+
+                # Draw interior angles at each corner if available
+                if sorted_corners is not None and interior_angles is not None:
+                    for idx, angle_deg in enumerate(interior_angles):
+                        corner = sorted_corners[idx].astype(int)
+                        cx, cy = corner[0], corner[1]
+                        # Display angle near corner
+                        angle_text = f"{angle_deg:.0f}°"
+                        cv2.putText(
+                            image,
+                            angle_text,
+                            (cx - 15, cy - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35,
+                            GOLD,
+                            1,
+                        )
+
+                # Add corner count label
+                corner_label = f"Corners: {len(detected_corners)}"
+                cv2.putText(
+                    image,
+                    corner_label,
+                    (0, 105),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    PINK,
+                )
+
+                # Display angle metrics if angles are available
+                if sorted_corners is not None and interior_angles is not None:
+                    # Check if it's a valid rectangle
+                    is_rect = self.is_valid_rectangle(
+                        interior_angles, angle_tolerance=20.0
+                    )
+                    rect_status = "✓ RECT" if is_rect else "✗ NOT RECT"
+                    status_color = GREEN if is_rect else RED
+
+                    # Show angle error (mean deviation from 90°)
+                    angle_error = self.compute_angle_error(interior_angles)
+                    error_text = f"Angle Error: {angle_error:.1f}°"
+
+                    cv2.putText(
+                        image,
+                        rect_status,
+                        (0, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        status_color,
+                    )
+                    cv2.putText(
+                        image,
+                        error_text,
+                        (0, 135),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        GOLD,
+                    )
+
+                    # Show frame counter if in hold period
+                    if self.active_crossing_center is not None:
+                        frame_text = f"Hold Frame: " f"{self.crossing_center_frames}/4"
+                        cv2.putText(
+                            image,
+                            frame_text,
+                            (0, 165),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5,
+                            CYAN,
+                        )
+            except Exception:
+                pass
+
+        # Draw crossing center (shifts 15px/frame if detected)
+        try:
+            if crossing_center is not None:
+                cx, cy = crossing_center
+                # Draw larger circle for crossing center
+                cv2.circle(image, (cx, cy), 12, GREEN, 3)
+                cv2.circle(image, (cx, cy), 8, CYAN, 2)
+
+                # Label shows frame counter only if center was detected
+                if self.active_crossing_center is not None:
+                    frame_indicator = f"CENTER ({self.crossing_center_frames + 1}/4)"
+                else:
+                    frame_indicator = "CENTER (ROI)"
+
+                # Add label
+                cv2.putText(
+                    image,
+                    frame_indicator,
+                    (cx + 15, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    GREEN,
+                    1,
+                )
+        except Exception:
+            pass
 
         # cones and small vertical clusters
         try:
@@ -327,7 +502,13 @@ class IntersectionDetector(SmartyNode):
         # draw roi box and legend
         try:
             roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
-            cv2.rectangle(image, (roi_left, roi_top), (roi_right, roi_bottom), RED, 2)
+            cv2.rectangle(
+                image,
+                (roi_left, roi_top),
+                (roi_right, roi_bottom),
+                RED,
+                2,
+            )
             image = self._draw_legend(
                 image,
                 [
@@ -339,6 +520,7 @@ class IntersectionDetector(SmartyNode):
                     ("Stop lines", VIOLET),
                     ("Crossing center", YELLOW),
                     ("Center (ROI)", TURQUOISE),
+                    ("Corners", CYAN),
                 ],
             )
         except Exception:
@@ -508,6 +690,136 @@ class IntersectionDetector(SmartyNode):
                 out[top:bottom, left:right] = processed
             else:
                 out[top:bottom, left:right] = blurred
+
+        return out
+
+    def _sharpen_roi(self, image, strength: float = 1.5, do_roi_top: bool = True):
+        """
+        Apply sharpening to the ROI to enhance lines after blurring.
+
+        Uses an unsharp mask technique: subtract a blurred copy from
+        original to create high-pass filter effect.
+
+        Arguments:
+            image -- BGR image (numpy array)
+            strength -- Sharpening intensity (1.0 = subtle, 2.0+ = strong)
+            do_roi_top -- If True, sharpen top ROI; if False, sharpen
+                          bottom ROI
+
+        Returns:
+            A copy of the image with ROI sharpened.
+        """
+        if image is None:
+            return image
+
+        h, w = image.shape[:2]
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+
+        # Clamp coordinates
+        roi_left = max(0, min(w - 1, int(roi_left)))
+        roi_right = max(0, min(w, int(roi_right)))
+        roi_top = max(0, min(h - 1, int(roi_top)))
+        roi_bottom = max(0, min(h, int(roi_bottom)))
+
+        # Determine which half to sharpen
+        if do_roi_top:
+            # Top half of ROI
+            top_half_end = roi_top + roi_bottom
+        else:
+            # Bottom half of ROI
+            top_half_end = roi_top + (roi_bottom - roi_top) // 2
+
+        # Ensure valid box
+        top = max(0, roi_top)
+        bottom = max(top, min(h, top_half_end if do_roi_top else roi_bottom))
+        left = max(0, roi_left)
+        right = max(0, min(w, roi_right))
+
+        out = image.copy()
+        if bottom > top and right > left:
+            patch = out[top:bottom, left:right].copy()
+
+            # Create blurred version
+            blurred = cv2.GaussianBlur(patch, (5, 5), 0)
+
+            # Unsharp mask: original + strength * (original - blurred)
+            sharpened = cv2.addWeighted(patch, 1.0 + strength, blurred, -strength, 0)
+
+            # Clip to valid range [0, 255]
+            sharpened = np.clip(sharpened, 0, 255).astype(patch.dtype)
+            out[top:bottom, left:right] = sharpened
+
+        return out
+
+    def _enhance_distorted_roi(
+        self,
+        image,
+        do_roi_top: bool = True,
+        morph_kernel_size: int = 5,
+        dilation_iterations: int = 1,
+    ):
+        """
+        Enhance edges in distorted ROI areas (especially bird's eye top).
+
+        Applies morphological operations (closing + dilation) to connect
+        broken/distorted lines in the top ROI region where perspective
+        distortion creates fragmented line segments.
+
+        Arguments:
+            image -- BGR image (numpy array)
+            do_roi_top -- If True, enhance top ROI; False for bottom
+            morph_kernel_size -- Kernel size for morphological ops (odd)
+            dilation_iterations -- Number of dilation passes (1-3)
+
+        Returns:
+            Image with enhanced distorted areas.
+        """
+        if image is None:
+            return image
+
+        h, w = image.shape[:2]
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+
+        # Clamp coordinates
+        roi_left = max(0, min(w - 1, int(roi_left)))
+        roi_right = max(0, min(w, int(roi_right)))
+        roi_top = max(0, min(h - 1, int(roi_top)))
+        roi_bottom = max(0, min(h, int(roi_bottom)))
+
+        # Determine which half to enhance
+        if do_roi_top:
+            # Top half (most distorted)
+            top_half_end = roi_top + roi_bottom
+        else:
+            # Bottom half
+            top_half_end = roi_top + (roi_bottom - roi_top) // 2
+
+        # Ensure valid box
+        top = max(0, roi_top)
+        bottom = max(top, min(h, top_half_end if do_roi_top else roi_bottom))
+        left = max(0, roi_left)
+        right = max(0, min(w, roi_right))
+
+        out = image.copy()
+        if bottom > top and right > left:
+            patch = out[top:bottom, left:right].copy()
+
+            # Ensure odd kernel size
+            if morph_kernel_size % 2 == 0:
+                morph_kernel_size += 1
+
+            # Create morphological kernel
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (morph_kernel_size, morph_kernel_size)
+            )
+
+            # 1. Morphological closing: fill small holes
+            closed = cv2.morphologyEx(patch, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+            # 2. Dilation: strengthen and connect broken lines
+            dilated = cv2.dilate(closed, kernel, iterations=dilation_iterations)
+
+            out[top:bottom, left:right] = dilated
 
         return out
 
@@ -1483,22 +1795,293 @@ class IntersectionDetector(SmartyNode):
 
     def find_crossing_center(self, intersection_points):
         """
-        Find center of crossing.
+        Find center of crossing using robust clustering with fallbacks.
 
         Arguments:
-            intersection_points -- desc
+            intersection_points -- List of (x, y) intersection points
 
         Returns:
-            returns
+            Tuple (x, y) of crossing center, or None if not determinable
         """
         if len(intersection_points) == 0:
             return None
-        points = np.array(intersection_points)
-        clustering = DBSCAN(eps=20, min_samples=5).fit(points)
-        labels = clustering.labels_
-        largest_cluster = mode(labels[labels != -1])
-        intersection_center = points[labels == largest_cluster].mean(axis=0)
-        return (int(intersection_center[0]), int(intersection_center[1]))
+
+        # Need at least 2 points to define a center
+        if len(intersection_points) < 2:
+            return None
+
+        points = np.array(intersection_points, dtype=float)
+
+        try:
+            # Try DBSCAN clustering with lenient parameters
+            # eps=40: allows points up to 40px apart (for larger crossings)
+            # min_samples=2: just need 2 intersections to form a cluster
+            clustering = DBSCAN(eps=40, min_samples=2).fit(points)
+            labels = clustering.labels_
+
+            # Get non-noise points (label != -1)
+            valid_mask = labels != -1
+            valid_labels = labels[valid_mask]
+
+            # If no cluster found, fall back to mean
+            if len(valid_labels) == 0:
+                center = points.mean(axis=0)
+                return (int(center[0]), int(center[1]))
+
+            # Find largest cluster
+            unique_labels, counts = np.unique(valid_labels, return_counts=True)
+            largest_label = unique_labels[np.argmax(counts)]
+
+            # Calculate mean of largest cluster
+            cluster_points = points[labels == largest_label]
+            center = cluster_points.mean(axis=0)
+
+            return (int(center[0]), int(center[1]))
+
+        except Exception as e:
+            self.get_logger().warning(f"DBSCAN clustering failed ({e}), using mean")
+            # Fallback: simple mean of all points
+            try:
+                center = points.mean(axis=0)
+                return (int(center[0]), int(center[1]))
+            except Exception:
+                return None
+
+    def find_corners_shi_tomasi(self, image, roi_bbox=None):
+        """
+        Detect corners using Shi-Tomasi corner detection.
+
+        (cv2.goodFeaturesToTrack).
+
+        This helps identify the edges/corners of the intersection by detecting
+        strong corner features that typically appear at road line junctions.
+
+        Arguments:
+            image -- Grayscale or color image to detect corners in.
+            roi_bbox -- Optional tuple (left, right, top, bottom) to limit
+                        corner detection to a specific region. If None, uses
+                        full image.
+
+        Returns:
+            List of corner coordinates as tuples (x, y), or empty list if no
+            corners are found.
+        """
+        if image is None:
+            return []
+
+        # Convert to grayscale if needed
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+
+        # If ROI is specified, extract that region for corner detection
+        if roi_bbox is not None:
+            roi_left, roi_right, roi_top, roi_bottom = roi_bbox
+            roi_region = gray[roi_top:roi_bottom, roi_left:roi_right]
+        else:
+            roi_left = 0
+            roi_right = gray.shape[1]
+            roi_top = 0
+            roi_bottom = gray.shape[0]
+            roi_region = gray
+
+        try:
+            # Shi Tomasi corner detection
+            corners = cv2.goodFeaturesToTrack(
+                roi_region,
+                maxCorners=4,
+                qualityLevel=0.01,
+                minDistance=200,
+                blockSize=3,
+                useHarrisDetector=False,
+            )
+
+            if corners is not None:
+                # Convert corner coordinates to original image space
+                # corners is shape (N, 1, 2), convert to list of tuples
+                corners_list = []
+                for corner in corners:
+                    x, y = corner.ravel()
+                    # Add ROI offset if we extracted a region
+                    corners_list.append((int(x + roi_left), int(y + roi_top)))
+                return corners_list
+            else:
+                return []
+
+        except Exception as e:
+            msg = f"Shi-Tomasi corner detection failed: {e}"
+            self.get_logger().warning(msg)
+            return []
+
+    def compute_crossing_center_from_corners(self, corners):
+        """
+        Compute crossing center from Shi-Tomasi corners if they form a rectangle.
+
+        The algorithm:
+        1. Sorts corners by angle around their centroid
+        2. Calculates interior angles of the polygon
+        3. If angle sum ≈ 360°, treats it as a valid rectangle
+        4. Returns the centroid as crossing center
+
+        Args:
+            corners: List of (x, y) corner coordinates.
+
+        Returns:
+            Tuple (center_x, center_y) if valid rectangle, None otherwise.
+        """
+        if not corners or len(corners) < 3:
+            return None
+
+        try:
+            corners_array = np.array(corners, dtype=np.float32)
+
+            # Compute centroid
+            centroid = np.mean(corners_array, axis=0)
+
+            # Sort corners by angle around centroid
+            angles = np.arctan2(
+                corners_array[:, 1] - centroid[1], corners_array[:, 0] - centroid[0]
+            )
+            sorted_indices = np.argsort(angles)
+            sorted_corners = corners_array[sorted_indices]
+
+            # Calculate interior angles at each corner
+            n = len(sorted_corners)
+            angle_sum = 0.0
+
+            for i in range(n):
+                p1 = sorted_corners[(i - 1) % n]
+                p2 = sorted_corners[i]
+                p3 = sorted_corners[(i + 1) % n]
+
+                # Vectors from p2 to p1 and p2 to p3
+                v1 = p1 - p2
+                v2 = p3 - p2
+
+                # Calculate angle between vectors
+                cos_angle = np.dot(v1, v2) / (
+                    np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6
+                )
+                cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                angle = np.arccos(cos_angle)
+                angle_sum += np.degrees(angle)
+
+            # Expected angle sum: (n-2) * 180 degrees
+            expected_sum = (n - 2) * 180.0
+
+            # Allow tolerance of ±30 degrees
+            tolerance = 30.0
+            if abs(angle_sum - expected_sum) <= tolerance:
+                # Valid polygon (approximately a rectangle)
+                center = tuple(centroid.astype(int))
+                return center
+            else:
+                return None
+
+        except Exception as e:
+            self.get_logger().warning(f"Crossing center from corners failed: {e}")
+            return None
+
+    def compute_corner_angles(self, corners):
+        """
+        Calculate the interior angles at each corner of a polygon.
+
+        Args:
+            corners: List of (x, y) corner coordinates.
+
+        Returns:
+            Tuple of (sorted_corners, angles_in_degrees) where:
+            - sorted_corners: corners sorted by angle around centroid
+            - angles_in_degrees: list of interior angles at each corner
+        """
+        if not corners or len(corners) < 3:
+            return None, None
+
+        try:
+            corners_array = np.array(corners, dtype=np.float32)
+
+            # Compute centroid
+            centroid = np.mean(corners_array, axis=0)
+
+            # Sort corners by angle around centroid
+            angles_rad = np.arctan2(
+                corners_array[:, 1] - centroid[1], corners_array[:, 0] - centroid[0]
+            )
+            sorted_indices = np.argsort(angles_rad)
+            sorted_corners = corners_array[sorted_indices]
+
+            # Calculate interior angles at each corner
+            n = len(sorted_corners)
+            interior_angles = []
+
+            for i in range(n):
+                p1 = sorted_corners[(i - 1) % n]
+                p2 = sorted_corners[i]
+                p3 = sorted_corners[(i + 1) % n]
+
+                # Vectors from p2 to p1 and p2 to p3
+                v1 = p1 - p2
+                v2 = p3 - p2
+
+                # Calculate angle between vectors
+                cos_angle = np.dot(v1, v2) / (
+                    np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6
+                )
+                cos_angle = np.clip(cos_angle, -1.0, 1.0)
+                angle_rad = np.arccos(cos_angle)
+                angle_deg = np.degrees(angle_rad)
+                interior_angles.append(angle_deg)
+
+            return sorted_corners, interior_angles
+
+        except Exception as e:
+            self.get_logger().warning(f"Corner angle calculation failed: {e}")
+            return None, None
+
+    def is_valid_rectangle(self, interior_angles, angle_tolerance=20.0):
+        """
+        Check if angles form a valid rectangle.
+
+        A valid rectangle requires at least 3 out of 4 angles close to 90°.
+
+        Args:
+            interior_angles: List of interior angles in degrees.
+            angle_tolerance: Allowed tolerance from 90° (default 20°).
+
+        Returns:
+            Boolean indicating if at least 3 angles are within tolerance of 90°.
+        """
+        if not interior_angles or len(interior_angles) < 3:
+            return False
+
+        target_angle = 90.0
+        valid_angle_count = sum(
+            1
+            for angle in interior_angles
+            if abs(angle - target_angle) <= angle_tolerance
+        )
+
+        # Require at least 3 out of 4 angles to be valid
+        return valid_angle_count >= 3
+
+    def compute_angle_error(self, interior_angles):
+        """
+        Calculate mean deviation of interior angles from 90°.
+
+        Args:
+            interior_angles: List of interior angles in degrees.
+
+        Returns:
+            Float representing the mean absolute deviation from 90°.
+            Returns inf if angles list is empty.
+        """
+        if not interior_angles:
+            return float("inf")
+
+        target_angle = 90.0
+        deviations = [abs(angle - target_angle) for angle in interior_angles]
+        return np.mean(deviations)
 
     def pull_point_to_roi_center(self, point, img_shape):
         """
@@ -1658,6 +2241,70 @@ class IntersectionDetector(SmartyNode):
         #    return False
 
         return True
+
+    def check_stop_line_pair_plausibility(
+        self,
+        stop_line_left,
+        stop_line_right,
+        max_y_diff: float = 30.0,
+        min_y_diff: float = 0.0,
+        max_x_separation: float = 200.0,
+        min_x_separation: float = 50.0,
+    ):
+        """
+        Validate stop lines: accept single lines or plausible pairs.
+
+        If both stop lines exist, they should:
+        - Be at roughly the same vertical position (y-coords close)
+        - Have appropriate horizontal separation (not too close, not too far)
+
+        If only one exists, it's accepted as valid.
+
+        Arguments:
+            stop_line_left -- Left stop line or None
+            stop_line_right -- Right stop line or None
+            max_y_diff -- Max vertical distance between left/right stop (pixels)
+            min_y_diff -- Min vertical distance between left/right stop (pixels)
+            max_x_separation -- Max horizontal separation between stops (pixels)
+            min_x_separation -- Min horizontal separation between stops (pixels)
+
+        Returns:
+            Tuple of (validated_left, validated_right)
+        """
+        # If both are None, that's okay
+        if stop_line_left is None and stop_line_right is None:
+            return None, None
+
+        # If only one exists, accept it as valid (unpaired stop line)
+        if (stop_line_left is None) != (stop_line_right is None):
+            return stop_line_left, stop_line_right
+
+        # Both exist: validate they form a plausible pair
+        if stop_line_left is not None and stop_line_right is not None:
+            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+
+            y_left = (y1_l + y2_l) / 2.0
+            y_right = (y1_r + y2_r) / 2.0
+            x_left = (x1_l + x2_l) / 2.0
+            x_right = (x1_r + x2_r) / 2.0
+
+            # Check 1: Vertical alignment (y-coords should be similar)
+            y_diff = abs(y_left - y_right)
+            if y_diff > max_y_diff or y_diff < min_y_diff:
+                # Not aligned vertically - likely false positives
+                return None, None
+
+            # Check 2: Horizontal separation (should be reasonable)
+            x_sep = abs(x_right - x_left)
+            if x_sep < min_x_separation or x_sep > max_x_separation:
+                # Not plausible horizontal separation
+                return None, None
+
+            # Pair is plausible
+            return stop_line_left, stop_line_right
+
+        return None, None
 
     def calculate_cat_eye(self, image):
         """
@@ -2064,6 +2711,14 @@ class IntersectionDetector(SmartyNode):
             image, ksize=(5, 5), sigmaX=0, do_close=True, close_kernel=(10, 3)
         )
 
+        # Enhance distorted ROI areas (bird's eye view distortion)
+        image = self._enhance_distorted_roi(
+            image,
+            do_roi_top=True,
+            morph_kernel_size=self.enhance_distortion_kernel,
+            dilation_iterations=self.enhance_distortion_dilations,
+        )
+
         q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
@@ -2095,7 +2750,13 @@ class IntersectionDetector(SmartyNode):
         crossing_center = None
         if getattr(self, "compute_crossing_center", True):
             try:
-                intersections = self.find_intersections(vert, horiz)
+                # Pre-filter lines by length before finding intersections
+                # This removes small noise lines that create spurious
+                # intersections
+                vert_filtered = self.filter_by_length(vert, min_length=100)
+                horiz_filtered = self.filter_by_length(horiz, min_length=100)
+
+                intersections = self.find_intersections(vert_filtered, horiz_filtered)
             except Exception as e:
                 self.get_logger().error(f"find_intersections error: {e}")
                 intersections = []
@@ -2112,12 +2773,74 @@ class IntersectionDetector(SmartyNode):
                 int((roi_top + roi_bottom) / 2),
             )
 
+        # Detect intersection corners using Shi-Tomasi
+        roi_bbox = self.get_roi_bbox(image.shape)
+        detected_corners = self.find_corners_shi_tomasi(image, roi_bbox=roi_bbox)
+
+        # Try to compute crossing center from corner geometry
+        crossing_center = None
+        if detected_corners and len(detected_corners) >= 3:
+            sorted_corners, interior_angles = self.compute_corner_angles(
+                detected_corners
+            )
+
+            if sorted_corners is not None and interior_angles is not None:
+                # Calculate error (mean deviation from 90°)
+                corner_error = self.compute_angle_error(interior_angles)
+
+                # Accept if error < 20° or valid rectangle
+                is_rect = self.is_valid_rectangle(interior_angles, angle_tolerance=20.0)
+
+                if corner_error < 20.0 or is_rect:
+                    center = np.mean(sorted_corners, axis=0).astype(int)
+                    # Start new 4-frame hold period
+                    self.detected_crossing_center = tuple(center)
+                    self.crossing_center_frames = 0
+                    self.crossing_center_error = corner_error
+                    self.active_crossing_center = self.detected_crossing_center
+
+        # Use active crossing center if in hold period with shifting
+        if self.active_crossing_center is not None:
+            # Get ROI bounds for bottom shift calculation
+            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+
+            # Shift 15px toward ROI bottom each frame
+            cx, cy = self.active_crossing_center
+            shift_amount = 15 * (self.crossing_center_frames + 1)
+            cy_shifted = min(cy + shift_amount, roi_bottom)
+
+            crossing_center = (cx, int(cy_shifted))
+
+            # Increment frame counter
+            self.crossing_center_frames += 1
+
+            # After 4 frames, reset everything
+            if self.crossing_center_frames >= 4:
+                self.active_crossing_center = None
+                self.detected_crossing_center = None
+                self.crossing_center_frames = 0
+                # Fallback to ROI center after hold period ends
+                roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(
+                    image.shape
+                )
+                crossing_center = (
+                    int((roi_left + roi_right) / 2),
+                    int((roi_top + roi_bottom) / 2),
+                )
+        else:
+            # No crossing center detected, use ROI center as default
+            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+            crossing_center = (
+                int((roi_left + roi_right) / 2),
+                int((roi_top + roi_bottom) / 2),
+            )
+
         lines = vert + horiz
         lines = self.filter_by_length(lines, min_length=70)
         fused_lines = lines
         # save short lines for stop line detection in quadrants
 
-        # Detect stop lines using ROI quadrants (Q1 for left, Q3 for right)
+        # Detect stop lines using ROI quadrants (Q1 for left, Q2 for right)
         stop_line_left = self.find_line_in_quadrant(lines, q1)
         stop_line_right = self.find_line_in_quadrant(lines, q2)
 
@@ -2137,7 +2860,7 @@ class IntersectionDetector(SmartyNode):
             )
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-            min_wr = 7.5 if stop_dotted_left else 20
+            min_wr = 15 if stop_dotted_left else 30
             if white_ratio_left >= min_wr:
                 label_stop_line_left = (
                     f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.1f}%)"
@@ -2163,7 +2886,7 @@ class IntersectionDetector(SmartyNode):
             )
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-            min_wr = 7.5 if stop_dotted_right else 20.0
+            min_wr = 15 if stop_dotted_right else 30
             if white_ratio_right >= min_wr:
                 label_stop_line_right = (
                     f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.1f}%)"
@@ -2172,6 +2895,68 @@ class IntersectionDetector(SmartyNode):
                 )
             else:
                 stop_line_right = None
+
+        # Plausibility checks for stop lines
+        # Right stop line: should be below opp line and above crossing center
+        if stop_line_right is not None and crossing_center is not None:
+            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+            stop_y_r = (y1_r + y2_r) / 2.0
+            crossing_y = crossing_center[1]
+            # Right stop should be above crossing center
+            if stop_y_r > crossing_y:
+                stop_line_right = None
+                label_stop_line_right = None
+
+        # Check ROI horizontal bounds for right and left stop lines
+        # (at least 10% inset from ROI edges)
+        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+        roi_width = roi_right - roi_left
+        min_x_inset = roi_left + roi_width * 0.1
+        max_x_inset = roi_right - roi_width * 0.1
+
+        # Right stop line should be within inset bounds
+        if stop_line_right is not None:
+            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+            stop_x_r = (x1_r + x2_r) / 2.0
+            # Right stop must be within 10%-90% of ROI width
+            if stop_x_r < min_x_inset or stop_x_r > max_x_inset:
+                stop_line_right = None
+                label_stop_line_right = None
+
+        # Left stop line: should be above ego and below opp
+        # (no crossing center plausibility for left)
+        if stop_line_left is not None:
+            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+            stop_y_l = (y1_l + y2_l) / 2.0
+            # Will check against ego/opp lines later when they're available
+            # For now, store the y position for comparison
+            self._stop_left_y = stop_y_l
+
+            # Left stop must also be within 10%-90% of ROI width
+            stop_x_l = (x1_l + x2_l) / 2.0
+            if stop_x_l < min_x_inset or stop_x_l > max_x_inset:
+                stop_line_left = None
+                label_stop_line_left = None
+                self._stop_left_y = None
+        else:
+            self._stop_left_y = None
+
+        # Validate stop line pair plausibility
+        # Both stop lines should be present and well-aligned to be valid
+        stop_line_left, stop_line_right = self.check_stop_line_pair_plausibility(
+            stop_line_left,
+            stop_line_right,
+            max_y_diff=300.0,
+            min_y_diff=100,
+            max_x_separation=360.0,
+            min_x_separation=280.0,
+        )
+        # Reset labels if pairs were invalidated
+        if stop_line_left is None:
+            label_stop_line_left = None
+            self._stop_left_y = None
+        if stop_line_right is None:
+            label_stop_line_right = None
 
         lines = self.filter_by_length(lines, min_length=100)
 
@@ -2209,8 +2994,8 @@ class IntersectionDetector(SmartyNode):
                     min_gap_count=3,
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
-                # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-                min_wr = 10.0 if ego_dotted else 22.0
+                # Dotted: wr >= 10%, Solid: wr >= 30% (percentage-based)
+                min_wr = 10.0 if ego_dotted else 30.0
                 if wr_ego >= min_wr:
                     label_ego = (
                         f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
@@ -2246,8 +3031,8 @@ class IntersectionDetector(SmartyNode):
                     min_gap_count=3,
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
-                # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-                min_wr = 10.0 if opp_dotted else 22.0
+                # Dotted: wr >= 10%, Solid: wr >= 30% (percentage-based)
+                min_wr = 10.0 if opp_dotted else 30.0
                 if wr_opp >= min_wr:
                     label_opp = (
                         f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.1f}%)"
@@ -2267,6 +3052,37 @@ class IntersectionDetector(SmartyNode):
                 pair_plausible = self.check_plausibility_horizontal_line_pair(
                     opp_line_long, ego_line_long, crossing_center
                 )
+
+            # Plausibility check for right stop line against opp line
+            # Right stop should be below (larger y) opp line
+            if stop_line_right is not None and opp_line_long is not None:
+                x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
+                opp_y = (y1_o + y2_o) / 2.0
+                x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+                stop_y_r = (y1_r + y2_r) / 2.0
+                # Right stop should not be above opp line
+                if stop_y_r < opp_y:
+                    stop_line_right = None
+                    label_stop_line_right = None
+
+            # Plausibility check for left stop line
+            # Should be above ego line and below opp line
+            if stop_line_left is not None and self._stop_left_y is not None:
+                if ego_line_long is not None:
+                    x1_e, y1_e, x2_e, y2_e = ego_line_long[0]
+                    ego_y = (y1_e + y2_e) / 2.0
+                    # Left stop should be above (smaller y) ego line
+                    if self._stop_left_y >= ego_y:
+                        stop_line_left = None
+                        label_stop_line_left = None
+
+                if stop_line_left is not None and opp_line_long is not None:
+                    x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
+                    opp_y = (y1_o + y2_o) / 2.0
+                    # Left stop should be below (larger y) opp line
+                    if self._stop_left_y <= opp_y:
+                        stop_line_left = None
+                        label_stop_line_left = None
 
         else:
             # no crossing center found for this frame; skip ego/opp identification
@@ -2331,6 +3147,7 @@ class IntersectionDetector(SmartyNode):
             horiz=None,
             joined_lines=fused_lines,
             crossing_center=crossing_center,
+            detected_corners=detected_corners,
             cone_left=None,
             cone_right=None,
             cl_vert=None,
@@ -2357,6 +3174,69 @@ class IntersectionDetector(SmartyNode):
         if stop_line_right is not None:
             x1, y1, x2, y2 = [int(v) for v in stop_line_right[0]]
             cv2.line(debug_image, (x1, y1), (x2, y2), VIOLET, 2)
+
+        # Draw stop line pair validation metrics when both lines are valid
+        if stop_line_left is not None and stop_line_right is not None:
+            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+
+            y_left = (y1_l + y2_l) / 2.0
+            y_right = (y1_r + y2_r) / 2.0
+            x_left = (x1_l + x2_l) / 2.0
+            x_right = (x1_r + x2_r) / 2.0
+
+            # Calculate metrics
+            y_diff = abs(y_left - y_right)
+            x_sep = abs(x_right - x_left)
+
+            # Draw vertical separation line between stop lines
+            y_mid = int((y_left + y_right) / 2.0)
+            x_left_int = int(x_left)
+            x_right_int = int(x_right)
+            cv2.line(
+                debug_image,
+                (x_left_int, y_mid),
+                (x_right_int, y_mid),
+                CYAN,
+                1,
+            )
+
+            # Draw vertical diffs at each line (small vertical lines)
+            diff_line_height = 20
+            cv2.line(
+                debug_image,
+                (x_left_int, int(y_left) - diff_line_height),
+                (x_left_int, int(y_left) + diff_line_height),
+                YELLOW,
+                1,
+            )
+            cv2.line(
+                debug_image,
+                (x_right_int, int(y_right) - diff_line_height),
+                (x_right_int, int(y_right) + diff_line_height),
+                YELLOW,
+                1,
+            )
+
+            # Render the metrics as text
+            metrics_y = 100
+            metrics_text_color = GREEN
+            cv2.putText(
+                debug_image,
+                f"y_diff={y_diff:.1f}px",
+                (debug_image.shape[1] - 200, metrics_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                metrics_text_color,
+            )
+            cv2.putText(
+                debug_image,
+                f"x_sep={x_sep:.1f}px",
+                (debug_image.shape[1] - 200, metrics_y + 25),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                metrics_text_color,
+            )
 
         # Draw stop line labels if present
         y_offset = 20
