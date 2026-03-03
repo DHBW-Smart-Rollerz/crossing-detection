@@ -14,8 +14,6 @@ from smarty_utils.enums import NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
 
-DEBUG = True
-
 # Color constants (RGB tuples - will be converted to BGR via cv2.COLOR_RGB2BGR)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
@@ -88,6 +86,8 @@ class IntersectionDetector(SmartyNode):
                 "enhance_distorted_roi_enabled": True,
                 "enhance_distortion_kernel": 5,
                 "enhance_distortion_dilations": 1,
+                # Gap detection debug visualization
+                "debug_line_gap_detection": False,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -142,6 +142,15 @@ class IntersectionDetector(SmartyNode):
             self.enhance_distorted_roi_enabled = True
             self.enhance_distortion_kernel = 5
             self.enhance_distortion_dilations = 1
+
+        # Read gap detection debug visualization parameter
+        try:
+            self.debug_line_gap_detection = self.get_parameter(
+                "debug_line_gap_detection"
+            ).value
+        except Exception:
+            # fallback default
+            self.debug_line_gap_detection = False
 
         # Debug overlay storage for line detection visualization
         self.debug_overlay_images = []
@@ -262,6 +271,7 @@ class IntersectionDetector(SmartyNode):
         pair_plausible=False,
         label=None,
         label2=None,
+        closest_line_angle=None,
     ):
         """
         Draw all debug overlays at once on a provided image.
@@ -496,6 +506,8 @@ class IntersectionDetector(SmartyNode):
                     0.5,
                     GREEN,
                 )
+            if closest_line_angle is not None:
+                self._draw_angle_arrow(image, closest_line_angle)
         except Exception:
             pass
 
@@ -865,6 +877,37 @@ class IntersectionDetector(SmartyNode):
 
         return img2
 
+    def _draw_angle_arrow(self, image, angle_deg, arrow_length=25):
+        """
+        Draw an arrow in the top right corner showing the detected angle.
+
+        Arguments:
+            image -- Image to draw on
+            angle_deg -- Angle in degrees (0-180, where 90 is vertical)
+            arrow_length -- Length of the arrow in pixels
+        """
+        try:
+            height, width = image.shape[:2]
+
+            center_x = width - 45
+            center_y = 40
+
+            angle_rad = math.radians(float(angle_deg))
+
+            end_x = center_x - arrow_length * math.cos(-angle_rad)
+            end_y = center_y + arrow_length * math.sin(-angle_rad)
+
+            cv2.arrowedLine(
+                image,
+                (int(center_x), int(center_y)),
+                (int(end_x), int(end_y)),
+                CYAN,
+                thickness=2,
+                tipLength=0.3,
+            )
+        except Exception:
+            pass
+
     def hough_transformation(self, img, img_edges):
         """
         Perform Hough Transformation to detect lines in the image.
@@ -890,15 +933,29 @@ class IntersectionDetector(SmartyNode):
         IntersectionDetector.show_image(img2, "houghlines")
         return transformed
 
-    def filter_by_angle(self, lines, tol_deg: float = 25.0, debug=True):
+    def filter_by_angle(
+        self,
+        lines,
+        tol_deg: float = 25.0,
+        anchor_angle=None,
+        anchor_tolerance=None,
+    ):
         """
         Filter lines based on their angle.
 
+        If anchor_angle is provided, filters lines into vertical and horizontal
+        categories relative to the anchor angle (tilted coordinate system).
+        Otherwise, filters into traditional vertical (90°) and horizontal (0°).
+
         Arguments:
-            hough_lines -- List of lines as pairs of points.
+            lines -- List of lines as pairs of points.
+            tol_deg -- Tolerance for vertical/horizontal classification (degrees)
+            debug -- Debug flag
+            anchor_angle -- Optional anchor angle to tilt the coordinate system
+            anchor_tolerance -- Tolerance around anchor (for vertical lines)
 
         Returns:
-            Filtered list of lines.
+            Tuple of (vertical_lines, horizontal_lines)
         """
         vertical = []
         horizontal = []
@@ -917,20 +974,31 @@ class IntersectionDetector(SmartyNode):
             if dx == 0 and dy == 0:
                 continue
 
-            # angle in degrees in range (-180, 180]
             angle = math.degrees(math.atan2(dy, dx))
-            # normalize to [0, 180)
             angle_norm = (angle + 360.0) % 180.0
 
-            # distance to horizontal (0 or 180) and to vertical (90)
-            dist_h = min(abs(angle_norm - 0.0), abs(angle_norm - 180.0))
-            dist_v = min(abs(angle_norm - 80.0), abs(angle_norm - 100.0))
+            if anchor_angle is not None and anchor_tolerance is not None:
+                angle_diff = abs(angle_norm - anchor_angle)
+                if angle_diff > 90.0:
+                    angle_diff = 180.0 - angle_diff
 
-            # classify by the nearer of the two, but require within tolerance
-            if dist_v <= tol_deg + 10 and dist_v < dist_h:
-                vertical.append(line)
-            elif dist_h <= tol_deg and dist_h < dist_v:
-                horizontal.append(line)
+                perpendicular = (anchor_angle + 90.0) % 180.0
+                perp_diff = abs(angle_norm - perpendicular)
+                if perp_diff > 90.0:
+                    perp_diff = 180.0 - perp_diff
+
+                if angle_diff <= anchor_tolerance:
+                    vertical.append(line)
+                elif perp_diff <= anchor_tolerance:
+                    horizontal.append(line)
+            else:
+                dist_h = min(abs(angle_norm - 0.0), abs(angle_norm - 180.0))
+                dist_v = min(abs(angle_norm - 80.0), abs(angle_norm - 100.0))
+
+                if dist_v <= tol_deg + 10 and dist_v < dist_h:
+                    vertical.append(line)
+                elif dist_h <= tol_deg and dist_h < dist_v:
+                    horizontal.append(line)
 
         return vertical, horizontal
 
@@ -1527,6 +1595,219 @@ class IntersectionDetector(SmartyNode):
         is_solid = frac >= white_patch_ratio
         return bool(is_solid), frac, valid_samples
 
+    def check_line_by_horizontal_extension(self, line, image, direction="right"):
+        """
+        Verify a line is a real lane line (not misclassified ego line).
+
+        Extends the line by 40px padding + 50px test length in the specified
+        direction and checks if it remains continuous (solid). Real lane lines
+        fade/break when extended; misclassified lines stay continuous.
+
+        Arguments:
+            line -- Line to check (numpy array shape (1,4))
+            image -- Image to test on
+            direction -- "right" or "left" (extends rightmost or leftmost endpoint)
+
+        Returns:
+            Tuple of (is_valid, extended_line)
+            - is_valid: False if line is valid, True if should be rejected
+            - extended_line: The extended line array for visualization
+        """
+        if line is None:
+            return False
+
+        try:
+            x1, y1, x2, y2 = line[0]
+
+            # Calculate slope
+            m = (y2 - y1) / (x2 - x1) if (x2 - x1) != 0 else 0
+
+            if direction == "right":
+                # Extend from rightmost endpoint
+                line_start = (x1, y1) if x1 > x2 else (x2, y2)
+
+                # Add 40px padding from line start
+                x_padded = line_start[0] + 40.0
+                y_padded = line_start[1] + m * 40.0
+
+                # Extend 50px further to the right
+                x2_extended = x_padded + 50.0
+                y2_extended = y_padded + m * 50.0
+
+            else:  # direction == "left"
+                # Extend from leftmost endpoint
+                line_start = (x1, y1) if x1 < x2 else (x2, y2)
+
+                # Add 40px padding from line start (going left, subtract)
+                x_padded = line_start[0] - 40.0
+                y_padded = line_start[1] - m * 40.0
+
+                # Extend 50px further to the left
+                x2_extended = x_padded - 50.0
+                y2_extended = y_padded - m * 50.0
+
+            extended_line = np.array(
+                [
+                    [
+                        x_padded,
+                        y_padded,
+                        x2_extended,
+                        y2_extended,
+                    ]
+                ],
+                dtype=np.float32,
+            )
+
+            # Test extended line for gaps
+            (
+                _,
+                gaps_count,
+                wr_extended,
+                _,
+            ) = self.is_line_dotted_by_gap_detection(
+                extended_line,
+                image,
+                box_half_width=22,
+                length_extend=1.1,
+                min_gap_count=3,
+            )
+
+            print(
+                f"EXTENSION TEST ({direction}): gaps={gaps_count} "
+                f"wr={wr_extended:.1f}%"
+            )
+
+            # Reject if no gaps and wr > 20% (continuous solid line)
+            if gaps_count == 0 and wr_extended > 20.0:
+                print(
+                    f"REJECTING: extended line ({direction}) is "
+                    f"continuous (wr={wr_extended:.1f}% > 20%)"
+                )
+                return True, extended_line  # Invalid, reject
+
+            return False, extended_line  # Valid, keep
+
+        except Exception as e:
+            self.get_logger().error(f"Error in check_line_by_horizontal_extension: {e}")
+            return False, None  # On error, assume valid
+
+    def check_line_by_vertical_extension(self, line, image, is_right=True):
+        """
+        Verify a stop line by extending from its endpoint.
+
+        For right stop line: extends from the lowest point (max y) downward.
+        For left stop line: extends from the highest point (min y) upward.
+
+        Arguments:
+            line -- Stop line to check (numpy array shape (1,4))
+            image -- Image to test on
+            is_right -- True for right stop line, False for left stop line
+
+        Returns:
+            Tuple of (gaps_count, wr_extended, extended_line)
+            - gaps_count: Number of gaps detected
+            - wr_extended: White ratio of extended line
+            - extended_line: The extended line array for visualization
+        """
+        if line is None:
+            return None, None
+
+        try:
+            x1, y1, x2, y2 = line[0]
+
+            if is_right:
+                # Right stop: extend from lowest point (max y) downward
+                # Find the point with maximum y
+                if y1 > y2:
+                    x_start, y_start = x1, y1
+                    x_other, y_other = x2, y2
+                else:
+                    x_start, y_start = x2, y2
+                    x_other, y_other = x1, y1
+
+                # Calculate slope along the line (for x-change)
+                if (y_start - y_other) != 0:
+                    slope = (x_start - x_other) / (y_start - y_other)
+                else:
+                    slope = 0.0
+
+                # Add 40px padding downward (increasing y)
+                x_padded = x_start + slope * 40.0
+                y_padded = y_start + 40.0
+
+                # Extend 50px further downward
+                x2_extended = x_padded + slope * 50.0
+                y2_extended = y_padded + 50.0
+
+            else:  # is_left
+                # Left stop: extend from highest point (min y) upward
+                # Find the point with minimum y
+                if y1 < y2:
+                    x_start, y_start = x1, y1
+                    x_other, y_other = x2, y2
+                else:
+                    x_start, y_start = x2, y2
+                    x_other, y_other = x1, y1
+
+                # Calculate slope along the line (for x-change)
+                if (y_start - y_other) != 0:
+                    slope = (x_start - x_other) / (y_start - y_other)
+                else:
+                    slope = 0.0
+
+                # Add 40px padding upward (decreasing y)
+                x_padded = x_start - slope * 40.0
+                y_padded = y_start - 40.0
+
+                # Extend 50px further upward
+                x2_extended = x_padded - slope * 50.0
+                y2_extended = y_padded - 50.0
+
+            extended_line = np.array(
+                [
+                    [
+                        x_padded,
+                        y_padded,
+                        x2_extended,
+                        y2_extended,
+                    ]
+                ],
+                dtype=np.float32,
+            )
+
+            print(
+                f"[DEBUG] Stop line {'RIGHT' if is_right else 'LEFT'}: "
+                f"start=({x_start:.1f}, {y_start:.1f}), "
+                f"padded=({x_padded:.1f}, {y_padded:.1f}), "
+                f"extended=({x2_extended:.1f}, {y2_extended:.1f})"
+            )
+
+            # Test extended line for gaps
+            (
+                _,
+                gaps_count,
+                wr_extended,
+                _,
+            ) = self.is_line_dotted_by_gap_detection(
+                extended_line,
+                image,
+                box_half_width=22,
+                length_extend=1.1,
+                min_gap_count=3,
+            )
+
+            stop_type = "RIGHT" if is_right else "LEFT"
+            print(
+                f"STOP LINE {stop_type} EXTENSION: gaps={gaps_count} "
+                f"wr={wr_extended:.1f}%"
+            )
+
+            return gaps_count, wr_extended, extended_line
+
+        except Exception as e:
+            self.get_logger().error(f"Error in check_line_by_vertical_extension: {e}")
+            return None, None, None
+
     def is_line_dotted_by_gap_detection(
         self,
         line,
@@ -1546,7 +1827,6 @@ class IntersectionDetector(SmartyNode):
         - Find continuous white segments along the horizontal profile.
         - Count gaps (white -> black -> white transitions).
         - If gaps >= min_gap_count => dotted.
-
         Returns (is_dotted: bool, gap_count: int, white_ratio: float, _=1)
         """
         if line is None or image is None:
@@ -1564,18 +1844,44 @@ class IntersectionDetector(SmartyNode):
             return False, 0, 0.0, 0
 
         angle = math.degrees(math.atan2(dy, dx))
+        # Normalize angle to [0, 180) so opposite directions are same
+        if angle < 0:
+            angle += 180
+
         mid_x = (x1 + x2) / 2.0
         mid_y = (y1 + y2) / 2.0
+
+        # DEBUG: Draw input line on image (controlled by node parameter)
+        if self.debug_line_gap_detection:
+            debug_image = image.copy()
+            cv2.line(
+                debug_image,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                (0, 0, 255),
+                3,
+            )
+            if not hasattr(self, "debug_overlay_images"):
+                self.debug_overlay_images = []
+            self.debug_overlay_images.append(debug_image)
 
         crop_w = int(max(10, line_len * float(length_extend))) + int(box_half_width * 2)
         crop_h = int(max(3, box_half_width * 2))
         h, w = image.shape[:2]
 
-        M = cv2.getRotationMatrix2D((mid_x, mid_y), -angle, 1.0)
+        M = cv2.getRotationMatrix2D((mid_x, mid_y), angle, 1.0)
         warped = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR)
 
         cx = M[0, 0] * mid_x + M[0, 1] * mid_y + M[0, 2]
         cy = M[1, 0] * mid_x + M[1, 1] * mid_y + M[1, 2]
+
+        # DEBUG: Log rotation details for tilted lines
+        if self.debug_line_gap_detection and abs(angle) > 10:
+            self.get_logger().info(
+                f"ROTATION DEBUG: angle={angle:.1f}° "
+                f"mid=({mid_x:.1f},{mid_y:.1f}) "
+                f"rotated_mid=({cx:.1f},{cy:.1f})"
+            )
 
         x0 = int(round(cx - crop_w / 2.0))
         y0 = int(round(cy - crop_h / 2.0))
@@ -1596,8 +1902,31 @@ class IntersectionDetector(SmartyNode):
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
         try:
+            # Adaptive thresholding: build histogram and find best threshold
+            # Histogram of pixel intensities
+            hist = np.histogram(gray.flatten(), bins=256, range=(45, 256))[0]
+
+            # Find peaks in the histogram (local maxima)
+            # We want the brightest peak (highest intensity with good count)
+            peaks = []
+            for i in range(1, len(hist) - 1):
+                if hist[i] > hist[i - 1] and hist[i] > hist[i + 1]:
+                    peaks.append((i, hist[i]))  # (intensity, count)
+
+            # If we have peaks, use the brightest one (highest intensity)
+            if peaks:
+                brightest_peak = max(peaks, key=lambda x: x[0])[0]
+                adaptive_thresh = min(255, brightest_peak - 20)
+            else:
+                # Fallback: use the overall max intensity - 20
+                adaptive_thresh = max(50, int(np.max(gray)) - 20)
+
+            # Use adaptive threshold if reasonable, else fall back
+            thresh_reasonable = 45 <= adaptive_thresh <= 220
+            thresh_to_use = adaptive_thresh if thresh_reasonable else 180
+
             # binarize: white pixels (line) vs black (background)
-            binary = gray > white_pixel_thresh
+            binary = gray > thresh_to_use
 
             # compute horizontal profile (white pixel count per column)
             white_per_col = np.sum(binary, axis=0)  # white pixels per column
@@ -1624,13 +1953,14 @@ class IntersectionDetector(SmartyNode):
             if in_gap and gap_length >= gap_size_min:
                 gaps += 1
 
-            # white ratio: percentage of white pixels in the bounding box
-            # white_per_col is array of white pixel counts per column
-            # crop_h is the height of the box
-            # total white pixels = sum of white_per_col
-            # total pixels in box = crop_h * len(white_per_col)
+            # white ratio: percentage of white pixels in ACTUAL bounding box
+            # NOTE: Use actual crop dimensions after clipping to bounds
+            # Tilted crops get clipped, reducing height; using intended
+            # crop_h would artificially lower the white ratio for tilted lines
+            actual_crop_h = int(y2c - y1c)  # actual height after clipping
+            actual_crop_w = int(x2c - x1c)  # actual width after clipping
             total_white_pixels = float(np.sum(white_per_col))
-            total_pixels = float(crop_h * len(white_per_col))
+            total_pixels = float(actual_crop_h * actual_crop_w)
             if total_pixels > 0:
                 white_ratio = (total_white_pixels / total_pixels) * 100.0
             else:
@@ -1638,8 +1968,80 @@ class IntersectionDetector(SmartyNode):
 
             is_dotted = gaps >= min_gap_count
 
+            # DEBUG: Render crop visualization (controlled by node param)
+            if self.debug_line_gap_detection:
+                # Show: original crop, grayscale, binary, and overlay
+                vis_crop = (
+                    crop.copy()
+                    if crop.ndim == 3
+                    else cv2.cvtColor(crop, cv2.COLOR_GRAY2BGR)
+                )
+                vis_h, vis_w = vis_crop.shape[:2]
+
+                # Transform line endpoints to warped image space
+                # then to crop space
+                x1_warped = M[0, 0] * x1 + M[0, 1] * y1 + M[0, 2]
+                y1_warped = M[1, 0] * x1 + M[1, 1] * y1 + M[1, 2]
+                x2_warped = M[0, 0] * x2 + M[0, 1] * y2 + M[0, 2]
+                y2_warped = M[1, 0] * x2 + M[1, 1] * y2 + M[1, 2]
+
+                # Convert to crop coordinates (relative to crop top-left)
+                line_x1_crop = int(x1_warped - x1c)
+                line_y1_crop = int(y1_warped - y1c)
+                line_x2_crop = int(x2_warped - x1c)
+                line_y2_crop = int(y2_warped - y1c)
+
+                # Clamp to crop bounds for visibility
+                line_x1_crop = max(0, min(vis_w - 1, line_x1_crop))
+                line_y1_crop = max(0, min(vis_h - 1, line_y1_crop))
+                line_x2_crop = max(0, min(vis_w - 1, line_x2_crop))
+                line_y2_crop = max(0, min(vis_h - 1, line_y2_crop))
+
+                # Draw the input line in red
+                cv2.line(
+                    vis_crop,
+                    (line_x1_crop, line_y1_crop),
+                    (line_x2_crop, line_y2_crop),
+                    (0, 0, 255),
+                    2,
+                )
+
+                # Draw horizontal analysis line in green
+                cv2.line(
+                    vis_crop,
+                    (0, vis_h // 2),
+                    (vis_w, vis_h // 2),
+                    (0, 255, 0),
+                    1,
+                )
+
+                # Create binary visualization
+                binary_vis = cv2.cvtColor(
+                    (binary * 255).astype(np.uint8),
+                    cv2.COLOR_GRAY2BGR,
+                )
+
+                # Create horizontal profile visualization
+                profile_h = 50
+                profile_w = len(white_per_col)
+                profile_vis = np.zeros((profile_h, profile_w, 3), dtype=np.uint8)
+                max_white = np.max(white_per_col) if np.max(white_per_col) > 0 else 1
+                for i, count in enumerate(white_per_col):
+                    h_bar = int((count / max_white) * profile_h)
+                    if h_bar > 0:
+                        profile_vis[profile_h - h_bar :, i] = [0, 255, 0]
+
+                # Stack visualizations vertically
+                vis_stack = np.vstack([vis_crop, binary_vis, profile_vis])
+
+                # Store for debug rendering
+                if not hasattr(self, "debug_overlay_images"):
+                    self.debug_overlay_images = []
+                self.debug_overlay_images.append(vis_stack)
+
             return bool(is_dotted), int(gaps), float(white_ratio), 1
-        except Exception:
+        except Exception as e:
+            self.get_logger().error(f"Error in is_line_dotted_by_gap_detection: {e}")
             return False, 0, 0.0, 0
 
     def is_line_dotted_ensemble(
@@ -1846,6 +2248,184 @@ class IntersectionDetector(SmartyNode):
                 return (int(center[0]), int(center[1]))
             except Exception:
                 return None
+
+    def find_closest_line_to_roi_bottom(self, lines, roi_bbox, image=None):
+        """
+        Find closest lines on left and right of ROI center in quadrants q3/q4.
+
+        Separates lines into left (x < roi_center_x) and right (x > roi_center_x)
+        groups, finds closest line in each group, and validates angle consistency.
+
+        Arguments:
+            lines -- List of detected lines (each line is [[x1, y1, x2, y2]])
+            roi_bbox -- Tuple (roi_left, roi_right, roi_top, roi_bottom)
+            image -- Optional image for quadrant calculation
+
+        Returns:
+            Tuple of (closest_line, angle_degrees) or (None, None) if validation fails
+        """
+        if lines is None or len(lines) == 0:
+            return None, None
+
+        roi_left, roi_right, roi_top, roi_bottom = roi_bbox
+
+        roi_center_x = (roi_left + roi_right) / 2.0
+        roi_bottom_y = roi_bottom
+
+        left_lines = []
+        right_lines = []
+
+        for line in lines:
+            try:
+                nl = self._normalize_line(line)
+                if nl is None:
+                    continue
+
+                x1, y1, x2, y2 = nl[0]
+                line_center_x = (x1 + x2) / 2.0
+
+                if line_center_x < roi_center_x:
+                    left_lines.append(nl)
+                else:
+                    right_lines.append(nl)
+            except Exception:
+                continue
+
+        closest_left = None
+        closest_left_dist = float("inf")
+        closest_left_angle = None
+
+        for line in left_lines:
+            try:
+                x1, y1, x2, y2 = line[0]
+                line_center_x = (x1 + x2) / 2.0
+                line_center_y = (y1 + y2) / 2.0
+
+                distance = math.hypot(
+                    line_center_x - roi_center_x, line_center_y - roi_bottom_y
+                )
+
+                if distance < closest_left_dist:
+                    closest_left_dist = distance
+                    closest_left = line
+
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    angle_rad = math.atan2(dy, dx)
+                    angle_deg = math.degrees(angle_rad)
+                    angle_norm = (angle_deg + 360.0) % 180.0
+                    closest_left_angle = angle_norm
+            except Exception:
+                continue
+
+        closest_right = None
+        closest_right_dist = float("inf")
+        closest_right_angle = None
+
+        for line in right_lines:
+            try:
+                x1, y1, x2, y2 = line[0]
+                line_center_x = (x1 + x2) / 2.0
+                line_center_y = (y1 + y2) / 2.0
+
+                distance = math.hypot(
+                    line_center_x - roi_center_x, line_center_y - roi_bottom_y
+                )
+
+                if distance < closest_right_dist:
+                    closest_right_dist = distance
+                    closest_right = line
+
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    angle_rad = math.atan2(dy, dx)
+                    angle_deg = math.degrees(angle_rad)
+                    angle_norm = (angle_deg + 360.0) % 180.0
+                    closest_right_angle = angle_norm
+            except Exception:
+                continue
+
+        if closest_left is None or closest_right is None:
+            return None, None
+
+        if closest_left_angle is None or closest_right_angle is None:
+            return None, None
+
+        angle_diff = abs(closest_left_angle - closest_right_angle)
+        if angle_diff > 10.0:
+            return None, None
+
+        avg_angle = (closest_left_angle + closest_right_angle) / 2.0
+        return closest_left, avg_angle
+
+    def find_prominent_angle_in_quadrants(self, lines, image):
+        """
+        Find the prominent angle from all detected lines using histogram.
+
+        Builds a histogram of angles from all lines, keeping only those
+        within ±45° of 90° (vertical), and finds the peak angle.
+
+        Arguments:
+            lines -- List of detected lines (each line is [[x1, y1, x2, y2]])
+            image -- Input image (unused, kept for compatibility)
+
+        Returns:
+            Tuple of (prominent_angle_deg, line_count) or (None, 0) if invalid
+        """
+        if lines is None or len(lines) == 0:
+            print("No lines provided to histogram")
+            return None, 0
+
+        valid_angles = []
+        lines_filtered_by_angle = 0
+
+        for line in lines:
+            try:
+                nl = self._normalize_line(line)
+                if nl is None:
+                    continue
+
+                x1, y1, x2, y2 = nl[0].astype(int)
+
+                dx = x2 - x1
+                dy = y2 - y1
+
+                if dx == 0 and dy == 0:
+                    continue
+
+                angle_rad = math.atan2(dy, dx)
+                angle_deg = math.degrees(angle_rad)
+
+                angle_norm = (angle_deg + 360.0) % 180.0
+
+                angle_error = abs(angle_norm - 90.0)
+                if angle_error > 45.0:
+                    lines_filtered_by_angle += 1
+                    continue
+
+                valid_angles.append(angle_norm)
+
+            except Exception:
+                continue
+
+        print(f"Total lines: {len(lines)}")
+        print(f"Lines filtered by angle (>45 deg): {lines_filtered_by_angle}")
+        print(f"Valid angles for histogram: {len(valid_angles)}")
+
+        if len(valid_angles) == 0:
+            return None, 0
+
+        valid_angles_arr = np.array(valid_angles)
+        hist, bin_edges = np.histogram(valid_angles_arr, bins=36, range=(0, 180))
+
+        peak_bin = int(np.argmax(hist))
+        prominent_angle = float((bin_edges[peak_bin] + bin_edges[peak_bin + 1]) / 2.0)
+
+        count_str = len(valid_angles)
+        msg = f"Prominent angle: {prominent_angle:.2f} deg ({count_str} lines)"
+        print(msg)
+
+        return prominent_angle, len(valid_angles)
 
     def find_corners_shi_tomasi(self, image, roi_bbox=None):
         """
@@ -2744,7 +3324,19 @@ class IntersectionDetector(SmartyNode):
             fused_lines, angle_tol_deg=5, center_dist_tol=25
         )
 
-        vert, horiz = self.filter_by_angle(fused_lines, tol_deg=5)
+        closest_line_angle = None
+        if fused_lines is not None and len(fused_lines) > 0:
+            closest_line_angle, line_count = self.find_prominent_angle_in_quadrants(
+                fused_lines, orig_image
+            )
+
+        # Filter by angle: tilt vert/horiz reference if angle is found
+        vert, horiz = self.filter_by_angle(
+            fused_lines,
+            anchor_angle=closest_line_angle,
+            anchor_tolerance=10.0,
+            tol_deg=5,
+        )
 
         # compute crossing center optionally; if disabled, use ROI center
         crossing_center = None
@@ -2767,10 +3359,11 @@ class IntersectionDetector(SmartyNode):
                 crossing_center = None
         else:
             # use ROI center as crossing center when computation is disabled
+            # positioned at 0.4 (upward) instead of 0.5 (center)
             roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
             crossing_center = (
                 int((roi_left + roi_right) / 2),
-                int((roi_top + roi_bottom) / 2),
+                int(roi_top + (roi_bottom - roi_top) * 0.4),
             )
 
         # Detect intersection corners using Shi-Tomasi
@@ -2819,20 +3412,20 @@ class IntersectionDetector(SmartyNode):
                 self.active_crossing_center = None
                 self.detected_crossing_center = None
                 self.crossing_center_frames = 0
-                # Fallback to ROI center after hold period ends
+                # Fallback to ROI center after hold period ends (at 0.4)
                 roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(
                     image.shape
                 )
                 crossing_center = (
                     int((roi_left + roi_right) / 2),
-                    int((roi_top + roi_bottom) / 2),
+                    int(roi_top + (roi_bottom - roi_top) * 0.4),
                 )
         else:
-            # No crossing center detected, use ROI center as default
+            # No crossing center detected, use ROI center as default (at 0.4)
             roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
             crossing_center = (
                 int((roi_left + roi_right) / 2),
-                int((roi_top + roi_bottom) / 2),
+                int(roi_top + (roi_bottom - roi_top) * 0.4),
             )
 
         lines = vert + horiz
@@ -2861,7 +3454,22 @@ class IntersectionDetector(SmartyNode):
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
             min_wr = 15 if stop_dotted_left else 30
-            if white_ratio_left >= min_wr:
+
+            # Check extension for left stop line
+            (
+                gaps_ext,
+                wr_ext,
+                stop_line_left_ext,
+            ) = self.check_line_by_vertical_extension(
+                stop_line_left, image, is_right=False
+            )
+            print(f"Left stop line: gaps_ext={gaps_ext}, wr_ext={wr_ext:.1f}%")
+
+            # Invalidate if extension test shows continuous solid line (no gaps
+            # and high white ratio)
+            line_left_ext_passed = gaps_ext > 0 and wr_ext <= 10
+
+            if white_ratio_left >= min_wr and line_left_ext_passed:
                 label_stop_line_left = (
                     f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.1f}%)"
                     if stop_dotted_left
@@ -2887,7 +3495,22 @@ class IntersectionDetector(SmartyNode):
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
             min_wr = 15 if stop_dotted_right else 30
-            if white_ratio_right >= min_wr:
+
+            # Check extension for right stop line
+            (
+                gaps_ext,
+                wr_ext,
+                stop_line_right_ext,
+            ) = self.check_line_by_vertical_extension(
+                stop_line_right, image, is_right=True
+            )
+            print(f"Right stop line: gaps_ext={gaps_ext}, " f"wr_ext={wr_ext:.1f}%")
+
+            # Invalidate if extension test shows continuous solid line (no gaps
+            # and high white ratio)
+            line_right_ext_passed = gaps_ext > 0 and wr_ext < 10
+
+            if white_ratio_right >= min_wr and line_right_ext_passed:
                 label_stop_line_right = (
                     f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.1f}%)"
                     if stop_dotted_right
@@ -2906,6 +3529,13 @@ class IntersectionDetector(SmartyNode):
             if stop_y_r > crossing_y:
                 stop_line_right = None
                 label_stop_line_right = None
+            else:
+                # Check that right stop's highest point (min y) is not below
+                # crossing center
+                min_y_r = min(y1_r, y2_r)
+                if min_y_r > crossing_y:
+                    stop_line_right = None
+                    label_stop_line_right = None
 
         # Check ROI horizontal bounds for right and left stop lines
         # (at least 10% inset from ROI edges)
@@ -2924,12 +3554,32 @@ class IntersectionDetector(SmartyNode):
                 label_stop_line_right = None
 
         # Left stop line: should be above ego and below opp
-        # (no crossing center plausibility for left)
-        if stop_line_left is not None:
+        if stop_line_left is not None and crossing_center is not None:
             x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
             stop_y_l = (y1_l + y2_l) / 2.0
-            # Will check against ego/opp lines later when they're available
-            # For now, store the y position for comparison
+            crossing_y = crossing_center[1]
+            # Left stop's lowest point (max y) cannot be above crossing
+            # center
+            max_y_l = max(y1_l, y2_l)
+            if max_y_l < crossing_y:
+                stop_line_left = None
+                label_stop_line_left = None
+                self._stop_left_y = None
+            else:
+                # Will check against ego/opp lines later when available
+                # For now, store the y position for comparison
+                self._stop_left_y = stop_y_l
+
+                # Left stop must also be within 10%-90% of ROI width
+                stop_x_l = (x1_l + x2_l) / 2.0
+                if stop_x_l < min_x_inset or stop_x_l > max_x_inset:
+                    stop_line_left = None
+                    label_stop_line_left = None
+                    self._stop_left_y = None
+        elif stop_line_left is not None:
+            # No crossing center available, store y for later check
+            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+            stop_y_l = (y1_l + y2_l) / 2.0
             self._stop_left_y = stop_y_l
 
             # Left stop must also be within 10%-90% of ROI width
@@ -2960,11 +3610,18 @@ class IntersectionDetector(SmartyNode):
 
         lines = self.filter_by_length(lines, min_length=100)
 
-        vert, horiz = self.filter_by_angle(lines)
+        # vert, horiz = self.filter_by_angle(lines)
+        vert, horiz = self.filter_by_angle(
+            fused_lines,
+            anchor_angle=closest_line_angle,
+            anchor_tolerance=10.0,
+            tol_deg=5,
+        )
 
         # Initialize variables for ego/opp lines
         ego_line_long = None
         opp_line_long = None
+        opp_line_extended = None
         pair_plausible = False
         label_ego = None
         label_opp = None
@@ -2995,8 +3652,26 @@ class IntersectionDetector(SmartyNode):
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
                 # Dotted: wr >= 10%, Solid: wr >= 30% (percentage-based)
-                min_wr = 10.0 if ego_dotted else 30.0
-                if wr_ego >= min_wr:
+                min_wr = 13.0 if ego_dotted else 23.0
+                print(f"EGO LINE: g={ego_gap_count} wr={wr_ego:.1f}%")
+
+                # Check both left and right extensions
+                (
+                    ego_left_check_fail,
+                    ego_line_ext_left,
+                ) = (
+                    self.check_line_by_horizontal_extension(
+                        clipped_ego, image, direction="left"
+                    )
+                    if clipped_ego is not None
+                    else (False, None)
+                )
+
+                ego_extension_check_passed = (
+                    not ego_left_check_fail if clipped_ego is not None else False
+                )
+
+                if wr_ego >= min_wr and ego_extension_check_passed:
                     label_ego = (
                         f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
                         if ego_dotted
@@ -3032,8 +3707,27 @@ class IntersectionDetector(SmartyNode):
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
                 # Dotted: wr >= 10%, Solid: wr >= 30% (percentage-based)
-                min_wr = 10.0 if opp_dotted else 30.0
-                if wr_opp >= min_wr:
+                min_wr = 13.0 if opp_dotted else 23.0
+                print(f"OPP LINE: g={opp_gap_count} wr={wr_opp:.1f}%")
+
+                opp_line_extended = None
+                # Check if line passes validation and extension test
+                (
+                    opp_check_fail,
+                    opp_line_ext_right,
+                ) = (
+                    self.check_line_by_horizontal_extension(
+                        clipped_opp, image, direction="right"
+                    )
+                    if clipped_opp is not None
+                    else (False, None)
+                )
+
+                opp_extension_check_passed = (
+                    not opp_check_fail if clipped_opp is not None else False
+                )
+
+                if wr_opp >= min_wr and opp_extension_check_passed:
                     label_opp = (
                         f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.1f}%)"
                         if opp_dotted
@@ -3047,6 +3741,8 @@ class IntersectionDetector(SmartyNode):
                     opp_line_long = None
                 else:
                     opp_line_long = clipped_opp
+
+            print(f"Detected ego line: {label_ego}, opp line: {label_opp}")
 
             if ego_line_long is not None and opp_line_long is not None:
                 pair_plausible = self.check_plausibility_horizontal_line_pair(
@@ -3159,6 +3855,7 @@ class IntersectionDetector(SmartyNode):
             pair_plausible=pair_plausible,
             label=label_ego,
             label2=label_opp,
+            closest_line_angle=closest_line_angle,
         )
 
         # Draw ROI quadrants
