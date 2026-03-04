@@ -3455,7 +3455,7 @@ class IntersectionDetector(SmartyNode):
             else:
                 endpoint_results.append(True)
 
-        return all(endpoint_results)
+        return any(endpoint_results)
 
     def calculate_cat_eye(self, image):
         """
