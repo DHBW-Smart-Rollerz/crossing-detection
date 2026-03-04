@@ -48,6 +48,325 @@ class LaneType(IntEnum):
 FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.8)  # left, right, top, bottom
 
 
+class IntersectionAggregator:
+    """
+    Aggregates intersection detection results over 10 frames.
+
+    Different line types have different memory durations:
+    - Stop lines (left/right): 3 frames
+    - Ego line: 5 frames
+    - Opp line: 3 frames
+
+    Accumulates all detections and provides the current
+    intersection configuration.
+    """
+
+    def __init__(self, max_frames=7):
+        """
+        Initialize the aggregator.
+
+        Args:
+            max_frames: Maximum number of frames to aggregate (7)
+        """
+        self.max_frames = max_frames
+        self.frame_count = 0
+        self.first_detection_frame = None
+
+        # Storage for detections with their frame numbers
+        # Format: (frame_num, line_data, is_dotted)
+        self.ego_lines = []
+        self.opp_lines = []
+        self.stop_line_left = []
+        self.stop_line_right = []
+
+        # Current dotted flags for each line type
+        self.ego_dotted = None
+        self.opp_dotted = None
+        self.stop_left_dotted = None
+        self.stop_right_dotted = None
+
+        # Memory durations for each line type
+        self.memory_durations = {
+            "ego": 3,
+            "opp": 4,
+            "stop_left": 6,
+            "stop_right": 5,
+        }
+
+    def add_detection(
+        self,
+        ego_line=None,
+        opp_line=None,
+        stop_line_left=None,
+        stop_line_right=None,
+        ego_dotted=None,
+        opp_dotted=None,
+        stop_dotted_left=None,
+        stop_dotted_right=None,
+    ):
+        """
+        Add detection results for the current frame.
+
+        Args:
+            ego_line: Ego line data (numpy array) or None
+            opp_line: Opp line data (numpy array) or None
+            stop_line_left: Left stop line data or None
+            stop_line_right: Right stop line data or None
+            ego_dotted: True if ego is dotted, False if solid
+            opp_dotted: True if opp is dotted, False if solid
+            stop_dotted_left: True if left stop is dotted
+            stop_dotted_right: True if right stop is dotted
+        """
+        # Initialize frame counter at first detection
+        if self.first_detection_frame is None and any(
+            [
+                ego_line is not None,
+                opp_line is not None,
+                stop_line_left is not None,
+                stop_line_right is not None,
+            ]
+        ):
+            self.first_detection_frame = 0
+
+        # Don't accumulate if no detections started yet
+        if self.first_detection_frame is None:
+            return
+
+        current_frame = self.frame_count
+
+        # Add to storage and update dotted flags
+        if ego_line is not None:
+            self.ego_lines.append((current_frame, ego_line.copy()))
+            self.ego_dotted = ego_dotted
+
+        if opp_line is not None:
+            self.opp_lines.append((current_frame, opp_line.copy()))
+            self.opp_dotted = opp_dotted
+
+        if stop_line_left is not None:
+            self.stop_line_left.append((current_frame, stop_line_left.copy()))
+            self.stop_left_dotted = stop_dotted_left
+
+        if stop_line_right is not None:
+            self.stop_line_right.append((current_frame, stop_line_right.copy()))
+            self.stop_right_dotted = stop_dotted_right
+
+        self.frame_count += 1
+
+    def _is_within_memory(self, detection_frame, current_frame, line_type):
+        """
+        Check if detection is within memory duration.
+
+        Args:
+            detection_frame: Frame number when detected
+            current_frame: Current frame number
+            line_type: Type of line
+
+        Returns:
+            True if within memory duration, False otherwise
+        """
+        frame_age = current_frame - detection_frame
+        max_age = self.memory_durations.get(line_type, 1)
+        return frame_age <= max_age
+
+    def get_current_configuration(self):
+        """
+        Get current intersection configuration.
+
+        Returns:
+            Dictionary with 'ego_line', 'opp_line',
+            'stop_line_left', 'stop_line_right', detection counts,
+            frame_count, and is_complete flag.
+        """
+        # Check if we have exceeded max frames
+        if self.first_detection_frame is not None and (
+            self.frame_count - self.first_detection_frame >= self.max_frames
+        ):
+            return self._get_final_config()
+
+        current_frame = self.frame_count - 1
+
+        # Filter by memory duration
+        valid_ego = [
+            line
+            for frame, line in self.ego_lines
+            if self._is_within_memory(frame, current_frame, "ego")
+        ]
+
+        valid_opp = [
+            line
+            for frame, line in self.opp_lines
+            if self._is_within_memory(frame, current_frame, "opp")
+        ]
+
+        valid_stop_left = [
+            line
+            for frame, line in self.stop_line_left
+            if self._is_within_memory(frame, current_frame, "stop_left")
+        ]
+
+        valid_stop_right = [
+            line
+            for frame, line in self.stop_line_right
+            if self._is_within_memory(frame, current_frame, "stop_right")
+        ]
+
+        config = {
+            "ego_line": valid_ego[-1] if valid_ego else None,
+            "opp_line": valid_opp[-1] if valid_opp else None,
+            "stop_line_left": (valid_stop_left[-1] if valid_stop_left else None),
+            "stop_line_right": (valid_stop_right[-1] if valid_stop_right else None),
+            "ego_detections": len(self.ego_lines),
+            "opp_detections": len(self.opp_lines),
+            "stop_left_detections": len(self.stop_line_left),
+            "stop_right_detections": len(self.stop_line_right),
+            "frame_count": self.frame_count,
+            "is_complete": all(
+                [valid_ego, valid_opp, valid_stop_left, valid_stop_right]
+            ),
+        }
+
+        return config
+
+    def _get_final_config(self):
+        """Get final configuration and reset aggregator."""
+        current_frame = self.frame_count - 1
+
+        valid_ego = [
+            line
+            for frame, line in self.ego_lines
+            if self._is_within_memory(frame, current_frame, "ego")
+        ]
+
+        valid_opp = [
+            line
+            for frame, line in self.opp_lines
+            if self._is_within_memory(frame, current_frame, "opp")
+        ]
+
+        valid_stop_left = [
+            line
+            for frame, line in self.stop_line_left
+            if self._is_within_memory(frame, current_frame, "stop_left")
+        ]
+
+        valid_stop_right = [
+            line
+            for frame, line in self.stop_line_right
+            if self._is_within_memory(frame, current_frame, "stop_right")
+        ]
+
+        config = {
+            "ego_line": valid_ego[-1] if valid_ego else None,
+            "opp_line": valid_opp[-1] if valid_opp else None,
+            "stop_line_left": (valid_stop_left[-1] if valid_stop_left else None),
+            "stop_line_right": (valid_stop_right[-1] if valid_stop_right else None),
+            "ego_detections": len(self.ego_lines),
+            "opp_detections": len(self.opp_lines),
+            "stop_left_detections": len(self.stop_line_left),
+            "stop_right_detections": len(self.stop_line_right),
+            "frame_count": self.frame_count,
+            "is_complete": all(
+                [valid_ego, valid_opp, valid_stop_left, valid_stop_right]
+            ),
+        }
+
+        # Reset for next aggregation cycle
+        self._reset()
+
+        return config
+
+    def _reset(self):
+        """Reset aggregator for next cycle."""
+        self.frame_count = 0
+        self.first_detection_frame = None
+        self.ego_lines = []
+        self.opp_lines = []
+        self.stop_line_left = []
+        self.stop_line_right = []
+
+    def is_aggregation_complete(self):
+        """Check if 10 frames have been aggregated."""
+        if self.first_detection_frame is None:
+            return False
+        return self.frame_count - self.first_detection_frame >= self.max_frames
+
+    def get_crossing_type(self):
+        """
+        Generate a crossing type string based on current state.
+
+        Only considers lines that are still within memory duration.
+
+        Format: es-od-ln-rn
+        - e: ego (es=solid, ed=dotted, en=none)
+        - o: opp (os=solid, od=dotted, on=none)
+        - l: left stop (ls=solid, ld=dotted, ln=none)
+        - r: right stop (rs=solid, rd=dotted, rn=none)
+
+        Returns:
+            String in format "es-od-ln-rn" representing the crossing
+        """
+        current_frame = self.frame_count - 1 if self.frame_count > 0 else 0
+
+        # Check ego line within memory
+        valid_ego = [
+            line
+            for frame, line in self.ego_lines
+            if self._is_within_memory(frame, current_frame, "ego")
+        ]
+        if len(valid_ego) == 0:
+            ego_type = "en"
+        elif self.ego_dotted is True:
+            ego_type = "ed"
+        else:
+            ego_type = "es"
+
+        # Check opp line within memory
+        valid_opp = [
+            line
+            for frame, line in self.opp_lines
+            if self._is_within_memory(frame, current_frame, "opp")
+        ]
+        if len(valid_opp) == 0:
+            opp_type = "on"
+        elif self.opp_dotted is True:
+            opp_type = "od"
+        else:
+            opp_type = "os"
+
+        # Check left stop line within memory
+        valid_stop_left = [
+            line
+            for frame, line in self.stop_line_left
+            if self._is_within_memory(frame, current_frame, "stop_left")
+        ]
+        if len(valid_stop_left) == 0:
+            left_stop_type = "ln"
+        elif self.stop_left_dotted is True:
+            left_stop_type = "ld"
+        else:
+            left_stop_type = "ls"
+
+        # Check right stop line within memory
+        valid_stop_right = [
+            line
+            for frame, line in self.stop_line_right
+            if self._is_within_memory(frame, current_frame, "stop_right")
+        ]
+        if len(valid_stop_right) == 0:
+            right_stop_type = "rn"
+        elif self.stop_right_dotted is True:
+            right_stop_type = "rd"
+        else:
+            right_stop_type = "rs"
+
+        # Combine into final string
+        crossing_type_str = (
+            f"{ego_type}-{opp_type}-{left_stop_type}" f"-{right_stop_type}"
+        )
+        return crossing_type_str
+
+
 lsd = cv2.createLineSegmentDetector(1)
 
 
@@ -160,6 +479,9 @@ class IntersectionDetector(SmartyNode):
         self.active_crossing_center = None  # currently used center
         self.crossing_center_frames = 0  # frame counter (0-3)
         self.crossing_center_error = float("inf")  # error metric
+
+        # Initialize intersection aggregator for result collection
+        self.intersection_aggregator = IntersectionAggregator(max_frames=9)
 
     @property
     def image_path(self) -> str:
@@ -908,6 +1230,141 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             pass
 
+    def _draw_crossing_type_visualization(self, image, crossing_type_str):
+        """
+        Draw a crossing type visualization in top right corner.
+
+        Shows a square with 4 lines like a real intersection:
+        - Top: OPP line
+        - Bottom: EGO line
+        - Left: LEFT STOP line
+        - Right: RIGHT STOP line
+
+        Green = detected, Red = not detected
+        Solid = solid line, Dotted = dotted line
+
+        Arguments:
+            image -- Image to draw on
+            crossing_type_str -- String like "es-od-ls-rn"
+        """
+        try:
+            height, width = image.shape[:2]
+
+            # Parse crossing type string
+            parts = crossing_type_str.split("-")
+            if len(parts) != 4:
+                return
+
+            ego_type = parts[0]  # en/es/ed
+            opp_type = parts[1]  # on/os/od
+            stop_l_type = parts[2]  # ln/ls/ld
+            stop_r_type = parts[3]  # rn/rs/rd
+
+            # Panel position and size
+            panel_x = width - 90
+            panel_y = 80
+            square_size = 50
+
+            # Draw semi-transparent background
+            overlay = image.copy()
+            cv2.rectangle(
+                overlay,
+                (panel_x - 10, panel_y - 10),
+                (panel_x + square_size + 10, panel_y + square_size + 10),
+                (0, 0, 0),
+                -1,
+            )
+            cv2.addWeighted(overlay, 0.4, image, 0.6, 0, image)
+
+            # Helper function to get color and draw style
+            def get_color_and_style(line_type):
+                """Get color and dotted flag from line type."""
+                is_detected = line_type[1] != "n"
+                is_dotted = line_type[1] == "d"
+                color = GREEN if is_detected else RED
+                return color, is_dotted
+
+            # Helper to draw a line (solid or dotted)
+            def draw_styled_line(pt1, pt2, color, is_dotted, thickness=2):
+                """Draw a line (solid or dotted)."""
+                if is_dotted:
+                    # Draw dotted line
+                    dx = pt2[0] - pt1[0]
+                    dy = pt2[1] - pt1[1]
+                    length = np.sqrt(dx**2 + dy**2)
+                    if length == 0:
+                        return
+
+                    dash_length = 5
+                    gap_length = 4
+                    step = dash_length + gap_length
+
+                    for i in range(0, int(length), step):
+                        t1 = i / length
+                        t2 = min((i + dash_length) / length, 1.0)
+
+                        p1 = (
+                            int(pt1[0] + t1 * dx),
+                            int(pt1[1] + t1 * dy),
+                        )
+                        p2 = (
+                            int(pt1[0] + t2 * dx),
+                            int(pt1[1] + t2 * dy),
+                        )
+                        cv2.line(image, p1, p2, color, thickness)
+                else:
+                    # Draw solid line
+                    cv2.line(image, pt1, pt2, color, thickness)
+
+            # Get colors and styles for each line
+            ego_color, ego_dotted = get_color_and_style(ego_type)
+            opp_color, opp_dotted = get_color_and_style(opp_type)
+            left_color, left_dotted = get_color_and_style(stop_l_type)
+            right_color, right_dotted = get_color_and_style(stop_r_type)
+
+            # Square corners
+            top_left = (panel_x, panel_y)
+            top_right = (panel_x + square_size, panel_y)
+            bottom_left = (panel_x, panel_y + square_size)
+            bottom_right = (
+                panel_x + square_size,
+                panel_y + square_size,
+            )
+
+            # Draw the 4 lines of the crossing square
+            # Top line (OPP)
+            draw_styled_line(top_left, top_right, opp_color, opp_dotted, thickness=2)
+
+            # Bottom line (EGO)
+            draw_styled_line(
+                bottom_left,
+                bottom_right,
+                ego_color,
+                ego_dotted,
+                thickness=2,
+            )
+
+            # Left line (LEFT STOP)
+            draw_styled_line(
+                top_left,
+                bottom_left,
+                left_color,
+                left_dotted,
+                thickness=2,
+            )
+
+            # Right line (RIGHT STOP)
+            draw_styled_line(
+                top_right,
+                bottom_right,
+                right_color,
+                right_dotted,
+                thickness=2,
+            )
+
+        except Exception:
+            pass
+
     def hough_transformation(self, img, img_edges):
         """
         Perform Hough Transformation to detect lines in the image.
@@ -1377,6 +1834,51 @@ class IntersectionDetector(SmartyNode):
             if nl is not None:
                 normalized.append(nl)
         return normalized
+
+    def _is_line_in_region(self, line, region):
+        """
+        Check if a line (or its endpoints) overlaps with a region.
+
+        Arguments:
+            line -- Line as (1,4) numpy array: [x1, y1, x2, y2]
+            region -- Tuple (x1, y1, x2, y2) defining the region bounds
+
+        Returns:
+            True if line has any point in the region, False otherwise
+        """
+        try:
+            nl = self._normalize_line(line)
+            if nl is None:
+                return False
+
+            x1, y1, x2, y2 = nl[0]
+            region_x1, region_y1, region_x2, region_y2 = region
+
+            # Check if either endpoint is in the region
+            p1_in = region_x1 <= x1 <= region_x2 and region_y1 <= y1 <= region_y2
+            p2_in = region_x1 <= x2 <= region_x2 and region_y1 <= y2 <= region_y2
+
+            if p1_in or p2_in:
+                return True
+
+            # Check if line intersects region bounds
+            # Simple bounding box check
+            line_x_min = min(x1, x2)
+            line_x_max = max(x1, x2)
+            line_y_min = min(y1, y2)
+            line_y_max = max(y1, y2)
+
+            overlap = (
+                line_x_min <= region_x2
+                and line_x_max >= region_x1
+                and line_y_min <= region_y2
+                and line_y_max >= region_y1
+            )
+
+            return overlap
+
+        except Exception:
+            return False
 
     def fuse_similar_lines(
         self,
@@ -2886,6 +3388,75 @@ class IntersectionDetector(SmartyNode):
 
         return None, None
 
+    def check_stop_line_endpoints_for_horizontals(self, stop_line, line_name, horiz):
+        """
+        Check if horizontal lines exist near both endpoints of stop line.
+
+        Validates that a stop line connects to horizontal lines at both
+        of its endpoints. Returns False if any endpoint has 0 horizontal
+        lines in a 60x60 region around it.
+
+        Arguments:
+            stop_line -- Stop line as (1,4) numpy array [x1,y1,x2,y2]
+            line_name -- Name for logging ("LEFT" or "RIGHT")
+            horiz -- List of horizontal lines to check against
+
+        Returns:
+            True if valid (has horiz lines at both endpoints),
+            False if should be rejected, None if stop_line is None.
+        """
+        if stop_line is None:
+            return None
+
+        x1, y1, x2, y2 = stop_line[0]
+
+        # Determine which is top (smaller y) and bottom (larger y)
+        if y1 < y2:
+            top_pt = (x1, y1)
+            bottom_pt = (x2, y2)
+        else:
+            top_pt = (x2, y2)
+            bottom_pt = (x1, y1)
+
+        # Check both endpoints
+        endpoints = [
+            ("top", top_pt),
+            ("bottom", bottom_pt),
+        ]
+
+        endpoint_results = []
+
+        for endpoint_name, (ep_x, ep_y) in endpoints:
+            # Create 60x60 search region around endpoint
+            search_region = (
+                int(ep_x - 30),
+                int(ep_y - 30),
+                int(ep_x + 30),
+                int(ep_y + 30),
+            )
+
+            # Find horizontal lines in region
+            horiz_lines_in_region = [
+                line
+                for line in horiz
+                if line is not None and self._is_line_in_region(line, search_region)
+            ]
+
+            num_lines = len(horiz_lines_in_region)
+            print(
+                f"{line_name} stop {endpoint_name} endpoint check "
+                f"(y={ep_y:.1f}): found {num_lines} horizontal lines "
+                f"in 60x60 region"
+            )
+
+            # Reject if no horizontal lines found at this endpoint
+            if num_lines == 0:
+                endpoint_results.append(False)
+            else:
+                endpoint_results.append(True)
+
+        return all(endpoint_results)
+
     def calculate_cat_eye(self, image):
         """
         Generate two cat's eye shapes (diamonds) for left and right stop line detection.
@@ -3611,32 +4182,28 @@ class IntersectionDetector(SmartyNode):
                 if max_y_l < crossing_y:
                     stop_line_left = None
                     label_stop_line_left = None
-                    self._stop_left_y = None
                 else:
-                    # Will check against ego/opp lines later when available
-                    # For now, store the y position for comparison
                     self._stop_left_y = stop_y_l
 
-                    # Left stop must also be within 10%-90% of ROI width
-                stop_x_l = (x1_l + x2_l) / 2.0
-                if stop_x_l < min_x_inset or stop_x_l > max_x_inset:
-                    stop_line_left = None
-                    label_stop_line_left = None
-                    self._stop_left_y = None
-        elif stop_line_left is not None:
-            # No crossing center available, store y for later check
-            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-            stop_y_l = (y1_l + y2_l) / 2.0
-            stop_x_l = (x1_l + x2_l) / 2.0
-            self._stop_left_y = stop_y_l
+        # Check for horizontal lines at the endpoints of stop lines
+        # If any endpoint has 0 horiz lines, reject the stop line
+        right_valid = self.check_stop_line_endpoints_for_horizontals(
+            stop_line_right, "RIGHT", horiz
+        )
+        left_valid = self.check_stop_line_endpoints_for_horizontals(
+            stop_line_left, "LEFT", horiz
+        )
 
-            # Left stop must also be within 10%-90% of ROI width
-            if stop_x_l < min_x_inset or stop_x_l > max_x_inset:
-                stop_line_left = None
-                label_stop_line_left = None
-                self._stop_left_y = None
-        else:
-            self._stop_left_y = None
+        # Reject stop lines if endpoint check failed
+        if right_valid is False:
+            print("RIGHT stop rejected: no horizontal lines at endpoint")
+            stop_line_right = None
+            label_stop_line_right = None
+
+        if left_valid is False:
+            print("LEFT stop rejected: no horizontal lines at endpoint")
+            stop_line_left = None
+            label_stop_line_left = None
 
         # Validate stop line pair plausibility
         # Both stop lines should be present and well-aligned to be valid
@@ -4038,6 +4605,34 @@ class IntersectionDetector(SmartyNode):
                     pass  # Skip if dimensions don't match
             # Clear the list for next frame
             self.debug_overlay_images.clear()
+
+        # Add detections to aggregator
+        if "ego_line_long" in locals():
+            ego_for_agg = ego_line_long if ego_line_long is not None else None
+        else:
+            ego_for_agg = None
+
+        if "opp_line_long" in locals():
+            opp_for_agg = opp_line_long if opp_line_long is not None else None
+        else:
+            opp_for_agg = None
+
+        stop_left_for_agg = stop_line_left if stop_line_left is not None else None
+        stop_right_for_agg = stop_line_right if stop_line_right is not None else None
+
+        self.intersection_aggregator.add_detection(
+            ego_line=ego_for_agg,
+            opp_line=opp_for_agg,
+            stop_line_left=stop_left_for_agg,
+            stop_line_right=stop_right_for_agg,
+        )
+
+        # Check if aggregation is complete
+        crossing_type = self.intersection_aggregator.get_crossing_type()
+        self.get_logger().info(f"Aggregated crossing type: {crossing_type}")
+
+        # Draw crossing type visualization in top right corner
+        self._draw_crossing_type_visualization(debug_image, crossing_type)
 
         # save debug image and return image + result list
         # IntersectionDetector.save_img_to_dir(
