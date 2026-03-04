@@ -3020,7 +3020,9 @@ class IntersectionDetector(SmartyNode):
             cv2.polylines(image, [pts], True, color, thickness)
         return image
 
-    def find_line_in_quadrant(self, lines, quadrant, min_length: float = 30.0):
+    def find_line_in_quadrant(
+        self, lines, quadrant, min_length: float = 30.0, require_full: bool = False
+    ):
         """
         Find the longest vertical line inside a quadrant.
 
@@ -3036,7 +3038,9 @@ class IntersectionDetector(SmartyNode):
             return None
 
         # Filter lines inside quadrant
-        quad_lines = self.filter_lines_by_polygon(lines, quadrant, require_full=False)
+        quad_lines = self.filter_lines_by_polygon(
+            lines, quadrant, require_full=require_full
+        )
 
         if quad_lines is None or len(quad_lines) == 0:
             return None
@@ -3434,8 +3438,10 @@ class IntersectionDetector(SmartyNode):
         # save short lines for stop line detection in quadrants
 
         # Detect stop lines using ROI quadrants (Q1 for left, Q2 for right)
-        stop_line_left = self.find_line_in_quadrant(lines, q1)
-        stop_line_right = self.find_line_in_quadrant(lines, q2)
+        stop_line_left = self.find_line_in_quadrant(lines, q1, min_length=60)
+        stop_line_right = self.find_line_in_quadrant(
+            lines, q2, min_length=60, require_full=True
+        )
 
         label_stop_line_left = None
         if stop_line_left is not None:
@@ -3543,8 +3549,12 @@ class IntersectionDetector(SmartyNode):
         roi_width = roi_right - roi_left
         min_x_inset = roi_left + roi_width * 0.1
         max_x_inset = roi_right - roi_width * 0.1
+        # Right stop needs sufficient space on the left (at least 60% from roi_left)
+        min_x_right_stop = roi_left + roi_width * 0.6
+        # Left stop needs sufficient space on the right (at most 40% from roi_left)
+        max_x_left_stop = roi_left + roi_width * 0.4
 
-        # Right stop line should be within inset bounds
+        # Right stop line should be within inset bounds and RIGHT of crossing center
         if stop_line_right is not None:
             x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
             stop_x_r = (x1_r + x2_r) / 2.0
@@ -3552,25 +3562,62 @@ class IntersectionDetector(SmartyNode):
             if stop_x_r < min_x_inset or stop_x_r > max_x_inset:
                 stop_line_right = None
                 label_stop_line_right = None
+            # Right stop must have sufficient space on the left (at least 60%)
+            elif stop_x_r < min_x_right_stop:
+                print(
+                    f"RIGHT stop rejected: x={stop_x_r:.1f} is too close to "
+                    f"left edge (min={min_x_right_stop:.1f})"
+                )
+                stop_line_right = None
+                label_stop_line_right = None
+            # Right stop must be RIGHT of crossing center (x > crossing_x)
+            elif crossing_center is not None:
+                crossing_x = crossing_center[0]
+                if stop_x_r < crossing_x:
+                    print(
+                        f"RIGHT stop rejected: x={stop_x_r:.1f} is left of "
+                        f"crossing x={crossing_x:.1f}"
+                    )
+                    stop_line_right = None
+                    label_stop_line_right = None
 
         # Left stop line: should be above ego and below opp
         if stop_line_left is not None and crossing_center is not None:
             x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
             stop_y_l = (y1_l + y2_l) / 2.0
+            stop_x_l = (x1_l + x2_l) / 2.0
             crossing_y = crossing_center[1]
-            # Left stop's lowest point (max y) cannot be above crossing
-            # center
-            max_y_l = max(y1_l, y2_l)
-            if max_y_l < crossing_y:
+            crossing_x = crossing_center[0]
+            # Left stop must be LEFT of crossing center (x < crossing_x)
+            if stop_x_l > crossing_x:
+                print(
+                    f"LEFT stop rejected: x={stop_x_l:.1f} is right of "
+                    f"crossing x={crossing_x:.1f}"
+                )
                 stop_line_left = None
                 label_stop_line_left = None
-                self._stop_left_y = None
+            # Left stop must have sufficient space on the right (at most 40%)
+            elif stop_x_l > max_x_left_stop:
+                print(
+                    f"LEFT stop rejected: x={stop_x_l:.1f} is too close to "
+                    f"right edge (max={max_x_left_stop:.1f})"
+                )
+                stop_line_left = None
+                label_stop_line_left = None
+            # Left stop's lowest point (max y) cannot be above crossing
+            # center
             else:
-                # Will check against ego/opp lines later when available
-                # For now, store the y position for comparison
-                self._stop_left_y = stop_y_l
+                max_y_l = max(y1_l, y2_l)
+                if max_y_l < crossing_y:
+                    stop_line_left = None
+                    label_stop_line_left = None
+                    self._stop_left_y = None
+                else:
+                    # Will check against ego/opp lines later when available
+                    # For now, store the y position for comparison
+                    self._stop_left_y = stop_y_l
 
-                # Left stop must also be within 10%-90% of ROI width
+                    # Left stop must also be within 10%-90% of ROI width
                 stop_x_l = (x1_l + x2_l) / 2.0
                 if stop_x_l < min_x_inset or stop_x_l > max_x_inset:
                     stop_line_left = None
@@ -3580,10 +3627,10 @@ class IntersectionDetector(SmartyNode):
             # No crossing center available, store y for later check
             x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
             stop_y_l = (y1_l + y2_l) / 2.0
+            stop_x_l = (x1_l + x2_l) / 2.0
             self._stop_left_y = stop_y_l
 
             # Left stop must also be within 10%-90% of ROI width
-            stop_x_l = (x1_l + x2_l) / 2.0
             if stop_x_l < min_x_inset or stop_x_l > max_x_inset:
                 stop_line_left = None
                 label_stop_line_left = None
