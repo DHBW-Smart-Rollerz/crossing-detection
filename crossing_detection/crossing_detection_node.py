@@ -3457,6 +3457,265 @@ class IntersectionDetector(SmartyNode):
 
         return any(endpoint_results)
 
+    def check_stop_line_crossing_openness(
+        self, stop_line_right, stop_line_left, image_gray
+    ):
+        """
+        Check if crossing center area is open (not too dark).
+
+        Finds the lowest point of right stop line and highest point of left
+        stop line, then checks if these areas contain < 40% black pixels.
+        This helps reject invalid stop line pairs that close off the
+        crossing.
+
+        Arguments:
+            stop_line_right -- Right stop line as (1,4) array or None
+            stop_line_left -- Left stop line as (1,4) array or None
+            image_gray -- Grayscale image for pixel analysis
+
+        Returns:
+            Tuple (right_valid, left_valid) where each is True/False/None
+        """
+        if image_gray is None or image_gray.size == 0:
+            return None, None
+
+        right_valid = None
+        left_valid = None
+
+        # Check right stop line's lowest point
+        if stop_line_right is not None:
+            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+            # Lowest point has max y
+            bottom_y_r = max(y1_r, y2_r)
+            bottom_x_r = x1_r if y1_r > y2_r else x2_r
+
+            # Create 30 wide x 50 tall box centered on this point
+            x_min = int(bottom_x_r - 15)
+            x_max = int(bottom_x_r + 15)
+            y_min = int(bottom_y_r)
+            y_max = int(bottom_y_r + 50)
+
+            # Clamp to image bounds
+            x_min = max(0, x_min)
+            x_max = min(image_gray.shape[1], x_max)
+            y_min = max(0, y_min)
+            y_max = min(image_gray.shape[0], y_max)
+
+            # Extract region and calculate black pixel percentage
+            if x_max > x_min and y_max > y_min:
+                region = image_gray[y_min:y_max, x_min:x_max]
+                total_pixels = region.size
+                # Pixels with value < 40 considered black
+                black_pixels = np.sum(region < 40)
+                black_pct = (
+                    (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
+                )
+
+                right_valid = black_pct > 70
+                print(
+                    f"RIGHT stop lowest point "
+                    f"(x={bottom_x_r:.1f}, y={bottom_y_r:.1f}): "
+                    f"{black_pct:.1f}%"
+                )
+            else:
+                right_valid = False  # Skip if region out of bounds
+
+        # Check left stop line's highest point
+        if stop_line_left is not None:
+            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+            # Highest point has min y
+            top_y_l = min(y1_l, y2_l)
+            top_x_l = x1_l if y1_l < y2_l else x2_l
+
+            # Create 30 wide x 50 tall box centered on this point
+            x_min = int(top_x_l - 15)
+            x_max = int(top_x_l + 15)
+            y_min = int(top_y_l - 50)
+            y_max = int(top_y_l)
+
+            # Clamp to image bounds
+            x_min = max(0, x_min)
+            x_max = min(image_gray.shape[1], x_max)
+            y_min = max(0, y_min)
+            y_max = min(image_gray.shape[0], y_max)
+
+            # Extract region and calculate black pixel percentage
+            if x_max > x_min and y_max > y_min:
+                region = image_gray[y_min:y_max, x_min:x_max]
+                total_pixels = region.size
+                # Pixels with value < 40 considered black
+                black_pixels = np.sum(region < 40)
+                black_pct = (
+                    (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
+                )
+
+                left_valid = black_pct > 70
+                print(
+                    f"LEFT stop highest point "
+                    f"(x={top_x_l:.1f}, y={top_y_l:.1f}): "
+                    f"{black_pct:.1f}%"
+                )
+            else:
+                left_valid = False  # Skip if region out of bounds
+
+        return right_valid, left_valid
+
+    def measure_stop_line_thickness(self, stop_line_left, stop_line_right, image_gray):
+        """
+        Measure the thickness of stop lines using orthogonal crosses.
+
+        Creates an orthogonal line through the middle of each stop line and
+        counts white pixels along that orthogonal to measure line thickness.
+
+        Arguments:
+            stop_line_right -- Right stop line as (1,4) array or None
+            stop_line_left -- Left stop line as (1,4) array or None
+            image_gray -- Grayscale image for pixel analysis
+
+        Returns:
+            Tuple (right_thickness, left_thickness) in pixels
+        """
+        try:
+            if image_gray is None or image_gray.size == 0:
+                return None, None
+
+            right_thickness = None
+            left_thickness = None
+
+            # Measure right stop line thickness
+            if stop_line_right is not None:
+                try:
+                    x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+
+                    # Find middle point of the line
+                    mid_x_r = (x1_r + x2_r) / 2.0
+                    mid_y_r = (y1_r + y2_r) / 2.0
+
+                    # Calculate line direction vector
+                    dx = x2_r - x1_r
+                    dy = y2_r - y1_r
+                    line_length = np.sqrt(dx**2 + dy**2)
+
+                    if line_length > 0:
+                        # Normalize direction vector
+                        dx_norm = dx / line_length
+                        dy_norm = dy / line_length
+
+                        # Orthogonal direction (perpendicular)
+                        orth_dx = -dy_norm
+                        orth_dy = dx_norm
+
+                        # Scan orthogonal line to count white pixels
+                        max_dist = 25
+                        thickness = 0
+                        pixel_values = []
+
+                        for dist in range(-max_dist, max_dist + 1):
+                            px = int(mid_x_r + dist * orth_dx)
+                            py = int(mid_y_r + dist * orth_dy)
+
+                            # Check if pixel is in bounds
+                            if (
+                                0 <= px < image_gray.shape[1]
+                                and 0 <= py < image_gray.shape[0]
+                            ):
+                                # Get pixel value and convert safely
+                                try:
+                                    pv = image_gray[py, px]
+                                    # Handle numpy types
+                                    if isinstance(pv, np.ndarray):
+                                        pv = float(pv.flat[0])
+                                    else:
+                                        pv = float(pv)
+                                    pixel_values.append(pv)
+                                    # Count bright pixels
+                                    if pv > 100:
+                                        thickness += 1
+                                except (ValueError, IndexError):
+                                    pass
+
+                        right_thickness = thickness
+                        avg_pix = (
+                            sum(pixel_values) / len(pixel_values) if pixel_values else 0
+                        )
+                        print(
+                            f"RIGHT thickness: {right_thickness} px, "
+                            f"avg={avg_pix:.0f} "
+                            f"(mid x={mid_x_r:.1f}, y={mid_y_r:.1f})"
+                        )
+                except Exception as e:
+                    print(f"Error measuring RIGHT thickness: {e}")
+
+            # Measure left stop line thickness
+            if stop_line_left is not None:
+                try:
+                    x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+
+                    # Find middle point of the line
+                    mid_x_l = (x1_l + x2_l) / 2.0
+                    mid_y_l = (y1_l + y2_l) / 2.0
+
+                    # Calculate line direction vector
+                    dx = x2_l - x1_l
+                    dy = y2_l - y1_l
+                    line_length = np.sqrt(dx**2 + dy**2)
+
+                    if line_length > 0:
+                        # Normalize direction vector
+                        dx_norm = dx / line_length
+                        dy_norm = dy / line_length
+
+                        # Orthogonal direction (perpendicular)
+                        orth_dx = -dy_norm
+                        orth_dy = dx_norm
+
+                        # Scan orthogonal line to count white pixels
+                        max_dist = 25
+                        thickness = 0
+                        pixel_values = []
+
+                        for dist in range(-max_dist, max_dist + 1):
+                            px = int(mid_x_l + dist * orth_dx)
+                            py = int(mid_y_l + dist * orth_dy)
+
+                            # Check if pixel is in bounds
+                            if (
+                                0 <= px < image_gray.shape[1]
+                                and 0 <= py < image_gray.shape[0]
+                            ):
+                                # Get pixel value and convert safely
+                                try:
+                                    pv = image_gray[py, px]
+                                    # Handle numpy types
+                                    if isinstance(pv, np.ndarray):
+                                        pv = float(pv.flat[0])
+                                    else:
+                                        pv = float(pv)
+                                    pixel_values.append(pv)
+                                    # Count bright pixels
+                                    if pv > 100:
+                                        thickness += 1
+                                except (ValueError, IndexError):
+                                    pass
+
+                        left_thickness = thickness
+                        avg_pix = (
+                            sum(pixel_values) / len(pixel_values) if pixel_values else 0
+                        )
+                        print(
+                            f"LEFT thickness: {left_thickness} px, "
+                            f"avg={avg_pix:.0f} "
+                            f"(mid x={mid_x_l:.1f}, y={mid_y_l:.1f})"
+                        )
+                except Exception as e:
+                    print(f"Error measuring LEFT thickness: {e}")
+
+            return right_thickness, left_thickness
+
+        except Exception as e:
+            print(f"Error in measure_stop_line_thickness: {e}")
+            return None, None
+
     def calculate_cat_eye(self, image):
         """
         Generate two cat's eye shapes (diamonds) for left and right stop line detection.
@@ -4185,25 +4444,41 @@ class IntersectionDetector(SmartyNode):
                 else:
                     self._stop_left_y = stop_y_l
 
-        # Check for horizontal lines at the endpoints of stop lines
-        # If any endpoint has 0 horiz lines, reject the stop line
-        right_valid = self.check_stop_line_endpoints_for_horizontals(
-            stop_line_right, "RIGHT", horiz
-        )
-        left_valid = self.check_stop_line_endpoints_for_horizontals(
-            stop_line_left, "LEFT", horiz
+        # Check if crossing is open (not blocked by too dark/black areas)
+        # This validates the right stop line's lowest point and left stop
+        # line's highest point have < 40% black pixels
+        cross_right_open, cross_left_open = self.check_stop_line_crossing_openness(
+            stop_line_right, stop_line_left, image
         )
 
-        # Reject stop lines if endpoint check failed
-        if right_valid is False:
-            print("RIGHT stop rejected: no horizontal lines at endpoint")
+        # Reject stop lines if crossing openness check failed
+        if not cross_right_open:
+            print("RIGHT stop rejected: crossing closing area too dark")
             stop_line_right = None
             label_stop_line_right = None
 
-        if left_valid is False:
-            print("LEFT stop rejected: no horizontal lines at endpoint")
+        if not cross_left_open:
+            print("LEFT stop rejected: crossing closing area too dark")
             stop_line_left = None
             label_stop_line_left = None
+
+        left_thickness, right_thickness = self.measure_stop_line_thickness(
+            stop_line_left, stop_line_right, image
+        )
+
+        if left_thickness is not None and left_thickness < 20 and not stop_dotted_left:
+            print(f"LEFT stop rejected: thickness {left_thickness:.1f} is too thin")
+            stop_line_left = None
+            label_stop_line_left = None
+
+        if (
+            right_thickness is not None
+            and right_thickness < 20
+            and not stop_dotted_right
+        ):
+            print(f"RIGHT stop rejected: thickness {right_thickness:.1f} is too thin")
+            stop_line_right = None
+            label_stop_line_right = None
 
         # Validate stop line pair plausibility
         # Both stop lines should be present and well-aligned to be valid
@@ -4625,6 +4900,14 @@ class IntersectionDetector(SmartyNode):
             opp_line=opp_for_agg,
             stop_line_left=stop_left_for_agg,
             stop_line_right=stop_right_for_agg,
+            ego_dotted=(ego_dotted if ego_for_agg is not None else None),
+            opp_dotted=(opp_dotted if opp_for_agg is not None else None),
+            stop_dotted_left=(
+                stop_dotted_left if stop_left_for_agg is not None else None
+            ),
+            stop_dotted_right=(
+                stop_dotted_right if stop_right_for_agg is not None else None
+            ),
         )
 
         # Check if aggregation is complete
