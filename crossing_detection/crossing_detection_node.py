@@ -3490,10 +3490,10 @@ class IntersectionDetector(SmartyNode):
             bottom_x_r = x1_r if y1_r > y2_r else x2_r
 
             # Create 30 wide x 50 tall box centered on this point
-            x_min = int(bottom_x_r - 15)
-            x_max = int(bottom_x_r + 15)
+            x_min = int(bottom_x_r - 12)
+            x_max = int(bottom_x_r + 12)
             y_min = int(bottom_y_r)
-            y_max = int(bottom_y_r + 50)
+            y_max = int(bottom_y_r + 70)
 
             # Clamp to image bounds
             x_min = max(0, x_min)
@@ -3511,7 +3511,7 @@ class IntersectionDetector(SmartyNode):
                     (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
                 )
 
-                right_valid = black_pct > 70
+                right_valid = black_pct > 55
                 print(
                     f"RIGHT stop lowest point "
                     f"(x={bottom_x_r:.1f}, y={bottom_y_r:.1f}): "
@@ -3528,9 +3528,9 @@ class IntersectionDetector(SmartyNode):
             top_x_l = x1_l if y1_l < y2_l else x2_l
 
             # Create 30 wide x 50 tall box centered on this point
-            x_min = int(top_x_l - 15)
-            x_max = int(top_x_l + 15)
-            y_min = int(top_y_l - 50)
+            x_min = int(top_x_l - 12)
+            x_max = int(top_x_l + 12)
+            y_min = int(top_y_l - 70)
             y_max = int(top_y_l)
 
             # Clamp to image bounds
@@ -3549,7 +3549,7 @@ class IntersectionDetector(SmartyNode):
                     (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
                 )
 
-                left_valid = black_pct > 70
+                left_valid = black_pct > 55
                 print(
                     f"LEFT stop highest point "
                     f"(x={top_x_l:.1f}, y={top_y_l:.1f}): "
@@ -3710,7 +3710,7 @@ class IntersectionDetector(SmartyNode):
                 except Exception as e:
                     print(f"Error measuring LEFT thickness: {e}")
 
-            return right_thickness, left_thickness
+            return left_thickness, right_thickness
 
         except Exception as e:
             print(f"Error in measure_stop_line_thickness: {e}")
