@@ -2272,7 +2272,18 @@ class IntersectionDetector(SmartyNode):
             patch = gray[top:bottom, left:right]
             if patch.size == 0:
                 return None
-            return float(np.mean(patch > white_pixel_thresh))
+
+            # Use Otsu's method for camera/light independent thresholding
+            try:
+                _, binary_patch = cv2.threshold(
+                    patch, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU
+                )
+                return float(np.mean(binary_patch))
+            except Exception:
+                # Fallback: use percentile-based thresholding
+                # (85th percentile as white threshold)
+                thresh = np.percentile(patch, 85)
+                return float(np.mean(patch > thresh))
 
         for t in t_values:
             px = (1.0 - t) * x1 + t * x2
@@ -2545,7 +2556,6 @@ class IntersectionDetector(SmartyNode):
         image,
         box_half_width: int = 22,
         length_extend: float = 1.2,
-        white_pixel_thresh: int = 180,
         min_gap_count: int = 2,
         gap_size_min: int = 3,
     ):
@@ -2554,7 +2564,7 @@ class IntersectionDetector(SmartyNode):
 
         Procedure:
         - Extract rotated box around the line.
-        - Binarize the box (white pixels = line pixels).
+        - Binarize the box using Otsu's method (camera/light independent).
         - Find continuous white segments along the horizontal profile.
         - Count gaps (white -> black -> white transitions).
         - If gaps >= min_gap_count => dotted.
@@ -2633,31 +2643,15 @@ class IntersectionDetector(SmartyNode):
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
         try:
-            # Adaptive thresholding: build histogram and find best threshold
-            # Histogram of pixel intensities
-            hist = np.histogram(gray.flatten(), bins=256, range=(45, 256))[0]
+            # Binarization using Otsu's method for camera/light independence.
+            # Otsu automatically finds optimal threshold by minimizing
+            # within-class variance - works across different cameras,
+            # lighting, and road conditions without parameter tweaking.
+            # This solves the WR normalization problem across different
+            # recordings.
 
-            # Find peaks in the histogram (local maxima)
-            # We want the brightest peak (highest intensity with good count)
-            peaks = []
-            for i in range(1, len(hist) - 1):
-                if hist[i] > hist[i - 1] and hist[i] > hist[i + 1]:
-                    peaks.append((i, hist[i]))  # (intensity, count)
-
-            # If we have peaks, use the brightest one (highest intensity)
-            if peaks:
-                brightest_peak = max(peaks, key=lambda x: x[0])[0]
-                adaptive_thresh = min(255, brightest_peak - 20)
-            else:
-                # Fallback: use the overall max intensity - 20
-                adaptive_thresh = max(50, int(np.max(gray)) - 20)
-
-            # Use adaptive threshold if reasonable, else fall back
-            thresh_reasonable = 45 <= adaptive_thresh <= 220
-            thresh_to_use = adaptive_thresh if thresh_reasonable else 180
-
-            # binarize: white pixels (line) vs black (background)
-            binary = gray > thresh_to_use
+            _, binary = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+            binary = binary.astype(bool)
 
             # compute horizontal profile (white pixel count per column)
             white_per_col = np.sum(binary, axis=0)  # white pixels per column
