@@ -50,48 +50,77 @@ FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.8)  # left, right, top, bottom
 
 class IntersectionAggregator:
     """
-    Aggregates intersection detection results over 10 frames.
+    Aggregates intersection detection results using a confidence buffer system.
 
-    Different line types have different memory durations:
-    - Stop lines (left/right): 3 frames
-    - Ego line: 5 frames
-    - Opp line: 3 frames
+    Each line type has a confidence buffer (0.0-1.0) that:
+    - Increments when detected (different increments per line type)
+    - Decays when not detected (different decay rates per line type)
+    - Becomes "valid" when buffer >= threshold
 
-    Accumulates all detections and provides the current
-    intersection configuration.
+    Line types:
+    - ego: increment 0.15, decay 0.05, threshold 0.4
+    - opp: increment 0.25, decay 0.08, threshold 0.35
+    - stop_left: increment 0.4, decay 0.12, threshold 0.3
+    - stop_right: increment 0.4, decay 0.12, threshold 0.3
     """
 
     def __init__(self, max_frames=7):
         """
-        Initialize the aggregator.
+        Initialize the aggregator with buffer system.
 
         Args:
-            max_frames: Maximum number of frames to aggregate (7)
+            max_frames: Maximum frames before reset (legacy, kept for compatibility)
         """
         self.max_frames = max_frames
         self.frame_count = 0
         self.first_detection_frame = None
 
-        # Storage for detections with their frame numbers
-        # Format: (frame_num, line_data, is_dotted)
-        self.ego_lines = []
-        self.opp_lines = []
-        self.stop_line_left = []
-        self.stop_line_right = []
+        # Confidence buffers (0.0 - 1.0)
+        self.ego_buffer = 0.0
+        self.opp_buffer = 0.0
+        self.stop_left_buffer = 0.0
+        self.stop_right_buffer = 0.0
 
-        # Current dotted flags for each line type
+        # Last detected line data
+        self.ego_line = None
+        self.opp_line = None
+        self.stop_line_left = None
+        self.stop_line_right = None
+
+        # Current dotted flags
         self.ego_dotted = None
         self.opp_dotted = None
         self.stop_left_dotted = None
         self.stop_right_dotted = None
 
-        # Memory durations for each line type
-        self.memory_durations = {
-            "ego": 3,
-            "opp": 4,
-            "stop_left": 6,
-            "stop_right": 5,
+        # Buffer configuration per line type
+        # increment: how much buffer increases per detection
+        # decay: how much buffer decreases per missed detection
+        # threshold: minimum buffer to be considered "valid"
+        self.buffer_config = {
+            "ego": {
+                "increment": 0.18,
+                "decay": 0.09,
+                "threshold": 0.30,
+            },
+            "opp": {
+                "increment": 0.25,
+                "decay": 0.05,
+                "threshold": 0.30,
+            },
+            "stop_left": {
+                "increment": 0.4,
+                "decay": 0.10,
+                "threshold": 0.3,
+            },
+            "stop_right": {
+                "increment": 0.4,
+                "decay": 0.10,
+                "threshold": 0.3,
+            },
         }
+
+        self.last_states = []
 
     def add_detection(
         self,
@@ -103,9 +132,16 @@ class IntersectionAggregator:
         opp_dotted=None,
         stop_dotted_left=None,
         stop_dotted_right=None,
+        ego_angle=None,
+        opp_angle=None,
     ):
         """
-        Add detection results for the current frame.
+        Add detection results and update buffers for current frame.
+
+        Buffers increment when line is detected, decay when not.
+        Each line type has different increment/decay/threshold.
+
+        If a line is not straight (angle != 0 or 90), add bonus.
 
         Args:
             ego_line: Ego line data (numpy array) or None
@@ -116,6 +152,8 @@ class IntersectionAggregator:
             opp_dotted: True if opp is dotted, False if solid
             stop_dotted_left: True if left stop is dotted
             stop_dotted_right: True if right stop is dotted
+            ego_angle: Prominent angle of ego line (degrees) or None
+            opp_angle: Prominent angle of opp line (degrees) or None
         """
         # Initialize frame counter at first detection
         if self.first_detection_frame is None and any(
@@ -128,174 +166,138 @@ class IntersectionAggregator:
         ):
             self.first_detection_frame = 0
 
-        # Don't accumulate if no detections started yet
-        if self.first_detection_frame is None:
-            return
-
-        current_frame = self.frame_count
-
-        # Add to storage and update dotted flags
+        # Process ego line
         if ego_line is not None:
-            self.ego_lines.append((current_frame, ego_line.copy()))
+            self.ego_line = ego_line.copy()
             self.ego_dotted = ego_dotted
+            cfg = self.buffer_config["ego"]
+            increment = cfg["increment"]
 
+            # If line angle is not straight (0° or 90°), add bonus
+            if ego_angle is not None:
+                # Check if angle is NOT ~0° or ~90° (allowing 5° tolerance)
+                is_straight = ego_angle < 5 or ego_angle > 85
+                if not is_straight:
+                    increment = increment * 1.8  # 80% bonus
+
+            self.ego_buffer = min(1.0, self.ego_buffer + increment)
+        else:
+            cfg = self.buffer_config["ego"]
+            self.ego_buffer = max(0.0, self.ego_buffer - cfg["decay"])
+
+        # Process opp line
         if opp_line is not None:
-            self.opp_lines.append((current_frame, opp_line.copy()))
+            self.opp_line = opp_line.copy()
             self.opp_dotted = opp_dotted
+            cfg = self.buffer_config["opp"]
+            increment = cfg["increment"]
 
+            # If line angle is not straight (0° or 90°), add bonus
+            if opp_angle is not None:
+                # Check if angle is NOT ~0° or ~90° (allowing 5° tolerance)
+                is_straight = opp_angle < 5 or opp_angle > 85
+                if not is_straight:
+                    increment = increment * 1.65  # 65% bonus
+
+            self.opp_buffer = min(1.0, self.opp_buffer + increment)
+        else:
+            cfg = self.buffer_config["opp"]
+            self.opp_buffer = max(0.0, self.opp_buffer - cfg["decay"])
+
+        # Process stop left line
         if stop_line_left is not None:
-            self.stop_line_left.append((current_frame, stop_line_left.copy()))
+            self.stop_line_left = stop_line_left.copy()
             self.stop_left_dotted = stop_dotted_left
+            cfg = self.buffer_config["stop_left"]
+            self.stop_left_buffer = min(1.0, self.stop_left_buffer + cfg["increment"])
+        else:
+            cfg = self.buffer_config["stop_left"]
+            self.stop_left_buffer = max(0.0, self.stop_left_buffer - cfg["decay"])
 
+        # Process stop right line
         if stop_line_right is not None:
-            self.stop_line_right.append((current_frame, stop_line_right.copy()))
+            self.stop_line_right = stop_line_right.copy()
             self.stop_right_dotted = stop_dotted_right
+            cfg = self.buffer_config["stop_right"]
+            self.stop_right_buffer = min(1.0, self.stop_right_buffer + cfg["increment"])
+        else:
+            cfg = self.buffer_config["stop_right"]
+            self.stop_right_buffer = max(0.0, self.stop_right_buffer - cfg["decay"])
 
         self.frame_count += 1
 
-    def _is_within_memory(self, detection_frame, current_frame, line_type):
+    def get_buffer_levels(self):
         """
-        Check if detection is within memory duration.
+        Get current confidence buffer levels for all line types.
 
-        Args:
-            detection_frame: Frame number when detected
-            current_frame: Current frame number
-            line_type: Type of line
+        Useful for debugging and visualization.
 
         Returns:
-            True if within memory duration, False otherwise
+            Dictionary with buffer levels (0.0-1.0) for each line type
         """
-        frame_age = current_frame - detection_frame
-        max_age = self.memory_durations.get(line_type, 1)
-        return frame_age <= max_age
+        return {
+            "ego": self.ego_buffer,
+            "opp": self.opp_buffer,
+            "stop_left": self.stop_left_buffer,
+            "stop_right": self.stop_right_buffer,
+        }
 
     def get_current_configuration(self):
         """
-        Get current intersection configuration.
+        Get current intersection configuration based on buffers.
+
+        Lines are valid if their buffer >= threshold.
 
         Returns:
             Dictionary with 'ego_line', 'opp_line',
-            'stop_line_left', 'stop_line_right', detection counts,
+            'stop_line_left', 'stop_line_right', buffer levels,
             frame_count, and is_complete flag.
         """
-        # Check if we have exceeded max frames
-        if self.first_detection_frame is not None and (
-            self.frame_count - self.first_detection_frame >= self.max_frames
-        ):
-            return self._get_final_config()
-
-        current_frame = self.frame_count - 1
-
-        # Filter by memory duration
-        valid_ego = [
-            line
-            for frame, line in self.ego_lines
-            if self._is_within_memory(frame, current_frame, "ego")
-        ]
-
-        valid_opp = [
-            line
-            for frame, line in self.opp_lines
-            if self._is_within_memory(frame, current_frame, "opp")
-        ]
-
-        valid_stop_left = [
-            line
-            for frame, line in self.stop_line_left
-            if self._is_within_memory(frame, current_frame, "stop_left")
-        ]
-
-        valid_stop_right = [
-            line
-            for frame, line in self.stop_line_right
-            if self._is_within_memory(frame, current_frame, "stop_right")
-        ]
-
         config = {
-            "ego_line": valid_ego[-1] if valid_ego else None,
-            "opp_line": valid_opp[-1] if valid_opp else None,
-            "stop_line_left": (valid_stop_left[-1] if valid_stop_left else None),
-            "stop_line_right": (valid_stop_right[-1] if valid_stop_right else None),
-            "ego_detections": len(self.ego_lines),
-            "opp_detections": len(self.opp_lines),
-            "stop_left_detections": len(self.stop_line_left),
-            "stop_right_detections": len(self.stop_line_right),
+            "ego_line": (
+                self.ego_line
+                if self.ego_buffer >= self.buffer_config["ego"]["threshold"]
+                else None
+            ),
+            "opp_line": (
+                self.opp_line
+                if self.opp_buffer >= self.buffer_config["opp"]["threshold"]
+                else None
+            ),
+            "stop_line_left": (
+                self.stop_line_left
+                if self.stop_left_buffer >= self.buffer_config["stop_left"]["threshold"]
+                else None
+            ),
+            "stop_line_right": (
+                self.stop_line_right
+                if self.stop_right_buffer
+                >= self.buffer_config["stop_right"]["threshold"]
+                else None
+            ),
             "frame_count": self.frame_count,
+            "buffer_levels": self.get_buffer_levels(),
             "is_complete": all(
-                [valid_ego, valid_opp, valid_stop_left, valid_stop_right]
+                [
+                    self.ego_line is not None
+                    and self.ego_buffer >= self.buffer_config["ego"]["threshold"],
+                    self.opp_line is not None
+                    and self.opp_buffer >= self.buffer_config["opp"]["threshold"],
+                    self.stop_line_left is not None
+                    and self.stop_left_buffer
+                    >= self.buffer_config["stop_left"]["threshold"],
+                    self.stop_line_right is not None
+                    and self.stop_right_buffer
+                    >= self.buffer_config["stop_right"]["threshold"],
+                ]
             ),
         }
 
         return config
-
-    def _get_final_config(self):
-        """Get final configuration and reset aggregator."""
-        current_frame = self.frame_count - 1
-
-        valid_ego = [
-            line
-            for frame, line in self.ego_lines
-            if self._is_within_memory(frame, current_frame, "ego")
-        ]
-
-        valid_opp = [
-            line
-            for frame, line in self.opp_lines
-            if self._is_within_memory(frame, current_frame, "opp")
-        ]
-
-        valid_stop_left = [
-            line
-            for frame, line in self.stop_line_left
-            if self._is_within_memory(frame, current_frame, "stop_left")
-        ]
-
-        valid_stop_right = [
-            line
-            for frame, line in self.stop_line_right
-            if self._is_within_memory(frame, current_frame, "stop_right")
-        ]
-
-        config = {
-            "ego_line": valid_ego[-1] if valid_ego else None,
-            "opp_line": valid_opp[-1] if valid_opp else None,
-            "stop_line_left": (valid_stop_left[-1] if valid_stop_left else None),
-            "stop_line_right": (valid_stop_right[-1] if valid_stop_right else None),
-            "ego_detections": len(self.ego_lines),
-            "opp_detections": len(self.opp_lines),
-            "stop_left_detections": len(self.stop_line_left),
-            "stop_right_detections": len(self.stop_line_right),
-            "frame_count": self.frame_count,
-            "is_complete": all(
-                [valid_ego, valid_opp, valid_stop_left, valid_stop_right]
-            ),
-        }
-
-        # Reset for next aggregation cycle
-        self._reset()
-
-        return config
-
-    def _reset(self):
-        """Reset aggregator for next cycle."""
-        self.frame_count = 0
-        self.first_detection_frame = None
-        self.ego_lines = []
-        self.opp_lines = []
-        self.stop_line_left = []
-        self.stop_line_right = []
-
-    def is_aggregation_complete(self):
-        """Check if 10 frames have been aggregated."""
-        if self.first_detection_frame is None:
-            return False
-        return self.frame_count - self.first_detection_frame >= self.max_frames
 
     def get_crossing_type(self):
         """
-        Generate a crossing type string based on current state.
-
-        Only considers lines that are still within memory duration.
+        Generate crossing type string based on current buffer states.
 
         Format: es-od-ln-rn
         - e: ego (es=solid, ed=dotted, en=none)
@@ -306,54 +308,42 @@ class IntersectionAggregator:
         Returns:
             String in format "es-od-ln-rn" representing the crossing
         """
-        current_frame = self.frame_count - 1 if self.frame_count > 0 else 0
+        # Check if each line is valid (buffer >= threshold)
+        ego_valid = self.ego_buffer >= self.buffer_config["ego"]["threshold"]
+        opp_valid = self.opp_buffer >= self.buffer_config["opp"]["threshold"]
+        stop_left_valid = (
+            self.stop_left_buffer >= self.buffer_config["stop_left"]["threshold"]
+        )
+        stop_right_valid = (
+            self.stop_right_buffer >= self.buffer_config["stop_right"]["threshold"]
+        )
 
-        # Check ego line within memory
-        valid_ego = [
-            line
-            for frame, line in self.ego_lines
-            if self._is_within_memory(frame, current_frame, "ego")
-        ]
-        if len(valid_ego) == 0:
+        # Determine ego type
+        if not ego_valid:
             ego_type = "en"
         elif self.ego_dotted is True:
             ego_type = "ed"
         else:
             ego_type = "es"
 
-        # Check opp line within memory
-        valid_opp = [
-            line
-            for frame, line in self.opp_lines
-            if self._is_within_memory(frame, current_frame, "opp")
-        ]
-        if len(valid_opp) == 0:
+        # Determine opp type
+        if not opp_valid:
             opp_type = "on"
         elif self.opp_dotted is True:
             opp_type = "od"
         else:
             opp_type = "os"
 
-        # Check left stop line within memory
-        valid_stop_left = [
-            line
-            for frame, line in self.stop_line_left
-            if self._is_within_memory(frame, current_frame, "stop_left")
-        ]
-        if len(valid_stop_left) == 0:
+        # Determine left stop type
+        if not stop_left_valid:
             left_stop_type = "ln"
         elif self.stop_left_dotted is True:
             left_stop_type = "ld"
         else:
             left_stop_type = "ls"
 
-        # Check right stop line within memory
-        valid_stop_right = [
-            line
-            for frame, line in self.stop_line_right
-            if self._is_within_memory(frame, current_frame, "stop_right")
-        ]
-        if len(valid_stop_right) == 0:
+        # Determine right stop type
+        if not stop_right_valid:
             right_stop_type = "rn"
         elif self.stop_right_dotted is True:
             right_stop_type = "rd"
@@ -364,7 +354,22 @@ class IntersectionAggregator:
         crossing_type_str = (
             f"{ego_type}-{opp_type}-{left_stop_type}" f"-{right_stop_type}"
         )
+
+        self.last_states.append(crossing_type_str)
+
         return crossing_type_str
+
+    def is_crossing_stable(self):
+        """
+        Check if the crossing state is stable (same for 2+ frames).
+
+        Returns:
+            True if current crossing state == previous state,
+            False otherwise
+        """
+        if len(self.last_states) > 1:
+            return self.last_states[-1] == self.last_states[-2]
+        return False
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -481,7 +486,7 @@ class IntersectionDetector(SmartyNode):
         self.crossing_center_error = float("inf")  # error metric
 
         # Initialize intersection aggregator for result collection
-        self.intersection_aggregator = IntersectionAggregator(max_frames=9)
+        self.intersection_aggregator = IntersectionAggregator(max_frames=7)
 
     @property
     def image_path(self) -> str:
@@ -1230,9 +1235,15 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             pass
 
-    def _draw_crossing_type_visualization(self, image, crossing_type_str):
+    def _draw_crossing_type_visualization(
+        self,
+        image,
+        crossing_type_str,
+        is_stable=False,
+        buffer_levels=None,
+    ):
         """
-        Draw a crossing type visualization in top right corner.
+        Draw crossing type visualization in top right corner.
 
         Shows a square with 4 lines like a real intersection:
         - Top: OPP line
@@ -1243,16 +1254,20 @@ class IntersectionDetector(SmartyNode):
         Green = detected, Red = not detected
         Solid = solid line, Dotted = dotted line
 
+        Also shows buffer fill state below the square.
+
         Arguments:
             image -- Image to draw on
             crossing_type_str -- String like "es-od-ls-rn"
+            is_stable -- True if crossing is stable
+            buffer_levels -- Dict with buffer levels
         """
         try:
             height, width = image.shape[:2]
 
             # Parse crossing type string
             parts = crossing_type_str.split("-")
-            if len(parts) != 4:
+            if len(parts) not in [4, 5]:
                 return
 
             ego_type = parts[0]  # en/es/ed
@@ -1361,6 +1376,70 @@ class IntersectionDetector(SmartyNode):
                 right_dotted,
                 thickness=2,
             )
+
+            # Draw purple dot to the right if crossing is stable
+            if is_stable:
+                # Purple color (BGR)
+                purple = (128, 0, 128)
+                # Dot position: right of the square
+                dot_x = panel_x + square_size + 20
+                dot_y = panel_y + square_size // 2
+                cv2.circle(image, (dot_x, dot_y), 5, purple, -1)
+
+            # Draw buffer fill visualization below the square
+            if buffer_levels is not None:
+                buffer_y_start = panel_y + square_size + 50
+                buffer_height = 60
+                buffer_width = 180
+                buffer_x = panel_x - 30
+
+                # Background panel
+                overlay = image.copy()
+                cv2.rectangle(
+                    overlay,
+                    (buffer_x, buffer_y_start),
+                    (
+                        buffer_x + buffer_width,
+                        buffer_y_start + buffer_height,
+                    ),
+                    (0, 0, 0),
+                    -1,
+                )
+                cv2.addWeighted(overlay, 0.4, image, 0.6, 0, image)
+
+                # Draw each buffer level
+                line_height = 15
+                buffers = [
+                    ("EGO", buffer_levels.get("ego", 0.0)),
+                    ("OPP", buffer_levels.get("opp", 0.0)),
+                    ("LEFT", buffer_levels.get("stop_left", 0.0)),
+                    ("RIGHT", buffer_levels.get("stop_right", 0.0)),
+                ]
+
+                for idx, (name, level) in enumerate(buffers):
+                    y_offset = buffer_y_start + 18 + idx * line_height
+
+                    # Format value with 2 decimal places
+                    value_str = f"{level:.2f}"
+
+                    # Color based on level
+                    if level < 0.3:
+                        color = (255, 255, 255)  # White
+                    elif level < 0.6:
+                        color = (0, 165, 255)  # Orange
+                    else:
+                        color = (0, 255, 0)  # Green
+
+                    # Draw label and value
+                    cv2.putText(
+                        image,
+                        f"{name}:{value_str}",
+                        (buffer_x + 5, y_offset),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        color,
+                        1,
+                    )
 
         except Exception:
             pass
@@ -3277,7 +3356,8 @@ class IntersectionDetector(SmartyNode):
 
         if nearest_line is not None:
             x1, y1, x2, y2 = nearest_line[0]
-            if math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) < 90:
+            if math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) < 80:
+                print("Nearest line too short, rejecting")
                 return None
         return nearest_line
 
@@ -4520,6 +4600,8 @@ class IntersectionDetector(SmartyNode):
             ego_line = self.find_ego_line(horiz, crossing_center)
             opp_line = self.find_opp_line(horiz, crossing_center)
 
+            print(f"Initial ego line: {ego_line}, opp line: {opp_line}")
+
             if ego_line is not None:
                 # Elongate and clip ego line to ROI band
                 ego_line_long = self.elongate_line(ego_line)
@@ -4560,7 +4642,47 @@ class IntersectionDetector(SmartyNode):
                     not ego_left_check_fail if clipped_ego is not None else False
                 )
 
-                if wr_ego >= min_wr and ego_extension_check_passed:
+                # NEW: Check if ego line is fully within ROI and not too far
+                # from crossing center (max 250px)
+                ego_roi_and_distance_check = False
+                if clipped_ego is not None and crossing_center is not None:
+                    roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(
+                        image.shape
+                    )
+
+                    x1, y1, x2, y2 = (
+                        float(clipped_ego[0][0]),
+                        float(clipped_ego[0][1]),
+                        float(clipped_ego[0][2]),
+                        float(clipped_ego[0][3]),
+                    )
+
+                    # Check if both endpoints are within ROI bounds
+                    in_roi_x = (
+                        roi_left <= x1 <= roi_right and roi_left <= x2 <= roi_right
+                    )
+                    in_roi_y = (
+                        roi_top <= y1 <= roi_bottom and roi_top <= y2 <= roi_bottom
+                    )
+
+                    # Check distance from line center to crossing center
+                    line_center_x = (x1 + x2) / 2.0
+                    line_center_y = (y1 + y2) / 2.0
+                    dist_to_center = math.sqrt(
+                        (line_center_x - crossing_center[0]) ** 2
+                        + (line_center_y - crossing_center[1]) ** 2
+                    )
+                    within_distance = dist_to_center <= 250
+
+                    ego_roi_and_distance_check = (
+                        in_roi_x and in_roi_y and within_distance
+                    )
+
+                if (
+                    wr_ego >= min_wr
+                    and ego_extension_check_passed
+                    and (ego_roi_and_distance_check)
+                ):
                     label_ego = (
                         f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
                         if ego_dotted
@@ -4908,14 +5030,20 @@ class IntersectionDetector(SmartyNode):
             stop_dotted_right=(
                 stop_dotted_right if stop_right_for_agg is not None else None
             ),
+            ego_angle=closest_line_angle,
+            opp_angle=closest_line_angle,
         )
 
         # Check if aggregation is complete
         crossing_type = self.intersection_aggregator.get_crossing_type()
+        is_stable = self.intersection_aggregator.is_crossing_stable()
+        buffer_levels = self.intersection_aggregator.get_buffer_levels()
         self.get_logger().info(f"Aggregated crossing type: {crossing_type}")
 
         # Draw crossing type visualization in top right corner
-        self._draw_crossing_type_visualization(debug_image, crossing_type)
+        self._draw_crossing_type_visualization(
+            debug_image, crossing_type, is_stable, buffer_levels
+        )
 
         # save debug image and return image + result list
         # IntersectionDetector.save_img_to_dir(
