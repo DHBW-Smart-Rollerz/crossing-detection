@@ -1,6 +1,7 @@
 import math
 import os
 import time
+from collections import deque
 from enum import IntEnum
 
 import cv2
@@ -122,6 +123,14 @@ class IntersectionAggregator:
 
         self.last_states = []
 
+        # Multi-frame buffer history for stability scoring
+        # Track last 7 frames of buffer values for each line type
+        self.history_size = 7
+        self.ego_history = deque(maxlen=self.history_size)
+        self.opp_history = deque(maxlen=self.history_size)
+        self.stop_left_history = deque(maxlen=self.history_size)
+        self.stop_right_history = deque(maxlen=self.history_size)
+
     def add_detection(
         self,
         ego_line=None,
@@ -137,6 +146,9 @@ class IntersectionAggregator:
     ):
         """
         Add detection results and update buffers for current frame.
+
+        Uses Exponential Moving Average (EMA) for smooth buffer updates
+        and tracks multi-frame history for stability scoring.
 
         Buffers increment when line is detected, decay when not.
         Each line type has different increment/decay/threshold.
@@ -180,9 +192,11 @@ class IntersectionAggregator:
                 if not is_straight:
                     increment = increment * 1.8  # 80% bonus
 
+            # Direct increment when detected
             self.ego_buffer = min(1.0, self.ego_buffer + increment)
         else:
             cfg = self.buffer_config["ego"]
+            # Simple decay when not detected
             self.ego_buffer = max(0.0, self.ego_buffer - cfg["decay"])
 
         # Process opp line
@@ -199,9 +213,11 @@ class IntersectionAggregator:
                 if not is_straight:
                     increment = increment * 1.65  # 65% bonus
 
+            # Direct increment when detected
             self.opp_buffer = min(1.0, self.opp_buffer + increment)
         else:
             cfg = self.buffer_config["opp"]
+            # Simple decay when not detected
             self.opp_buffer = max(0.0, self.opp_buffer - cfg["decay"])
 
         # Process stop left line
@@ -209,9 +225,12 @@ class IntersectionAggregator:
             self.stop_line_left = stop_line_left.copy()
             self.stop_left_dotted = stop_dotted_left
             cfg = self.buffer_config["stop_left"]
-            self.stop_left_buffer = min(1.0, self.stop_left_buffer + cfg["increment"])
+            increment = cfg["increment"]
+            # Direct increment when detected
+            self.stop_left_buffer = min(1.0, self.stop_left_buffer + increment)
         else:
             cfg = self.buffer_config["stop_left"]
+            # Simple decay when not detected
             self.stop_left_buffer = max(0.0, self.stop_left_buffer - cfg["decay"])
 
         # Process stop right line
@@ -219,10 +238,19 @@ class IntersectionAggregator:
             self.stop_line_right = stop_line_right.copy()
             self.stop_right_dotted = stop_dotted_right
             cfg = self.buffer_config["stop_right"]
-            self.stop_right_buffer = min(1.0, self.stop_right_buffer + cfg["increment"])
+            increment = cfg["increment"]
+            # Direct increment when detected
+            self.stop_right_buffer = min(1.0, self.stop_right_buffer + increment)
         else:
             cfg = self.buffer_config["stop_right"]
+            # Simple decay when not detected
             self.stop_right_buffer = max(0.0, self.stop_right_buffer - cfg["decay"])
+
+        # Track buffer history for stability scoring
+        self.ego_history.append(self.ego_buffer)
+        self.opp_history.append(self.opp_buffer)
+        self.stop_left_history.append(self.stop_left_buffer)
+        self.stop_right_history.append(self.stop_right_buffer)
 
         self.frame_count += 1
 
@@ -370,6 +398,94 @@ class IntersectionAggregator:
         if len(self.last_states) > 1:
             return self.last_states[-1] == self.last_states[-2]
         return False
+
+    def get_overall_confidence(self):
+        """
+        Calculate overall intersection confidence from buffer fill states.
+
+        Confidence is the average of all 4 buffer levels (0.0-1.0),
+        weighted by stability score.
+
+        High stability means the buffers are consistent (less noise).
+        Formula: confidence = average_buffer * stability_weight
+
+        Returns:
+            Float between 0.0-1.0 representing overall confidence
+        """
+        buffer_levels = self.get_buffer_levels()
+        stability_score = self.get_stability_score()
+
+        # Calculate base confidence from buffers
+        buffers = [
+            buffer_levels["ego"],
+            buffer_levels["opp"],
+            buffer_levels["stop_left"],
+            buffer_levels["stop_right"],
+        ]
+        buffers = [b for b in buffers if b > 0.0]
+        base_confidence = sum(buffers) / len(buffers) if buffers else 0.0
+
+        # Weight by stability (stable = confidence boosted, unstable = reduced)
+        # stability ranges from 0.0-1.0
+        stability_weight = 0.85 + 0.15 * stability_score["overall"]
+
+        overall_confidence = base_confidence * stability_weight
+        return min(1.0, overall_confidence)  # Ensure max 1.0
+
+    def get_stability_score(self):
+        """
+        Calculate stability score based on multi-frame buffer history.
+
+        Stability measures how consistent the buffers have been over the
+        last 7 frames. A high stability score indicates low jitter/noise.
+
+        Formula: stability = 1 - (std_dev / mean)
+        - If std_dev is low relative to mean → stable (close to 1.0)
+        - If std_dev is high relative to mean → unstable (close to 0.0)
+
+        Returns:
+            Dictionary with stability scores for each line type (0.0-1.0)
+        """
+        import numpy as np
+
+        def calculate_stability(history):
+            """Calculate stability for a single buffer history."""
+            if len(history) < 2:
+                return 1.0  # Only 1 or 0 samples - assume stable
+
+            history_array = np.array(list(history))
+            mean_val = np.mean(history_array)
+
+            # Avoid division by zero
+            if mean_val < 0.01:
+                return 1.0  # Very close to zero - treat as stable
+
+            std_dev = np.std(history_array)
+            # Coefficient of variation: std_dev / mean
+            cv = std_dev / mean_val
+
+            # Stability = 1 - CV, clamped to [0, 1]
+            stability = max(0.0, min(1.0, 1.0 - cv))
+            return stability
+
+        ego_stability = calculate_stability(self.ego_history)
+        opp_stability = calculate_stability(self.opp_history)
+        stop_left_stability = calculate_stability(self.stop_left_history)
+        stop_right_stability = calculate_stability(self.stop_right_history)
+
+        return {
+            "ego": ego_stability,
+            "opp": opp_stability,
+            "stop_left": stop_left_stability,
+            "stop_right": stop_right_stability,
+            "overall": (
+                ego_stability
+                + opp_stability
+                + stop_left_stability
+                + stop_right_stability
+            )
+            / 4,
+        }
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -1241,6 +1357,7 @@ class IntersectionDetector(SmartyNode):
         crossing_type_str,
         is_stable=False,
         buffer_levels=None,
+        overall_confidence=0.0,
     ):
         """
         Draw crossing type visualization in top right corner.
@@ -1254,13 +1371,15 @@ class IntersectionDetector(SmartyNode):
         Green = detected, Red = not detected
         Solid = solid line, Dotted = dotted line
 
-        Also shows buffer fill state below the square.
+        Also shows buffer fill state below the square and
+        overall intersection confidence.
 
         Arguments:
             image -- Image to draw on
             crossing_type_str -- String like "es-od-ls-rn"
             is_stable -- True if crossing is stable
             buffer_levels -- Dict with buffer levels
+            overall_confidence -- Overall confidence (0.0-1.0)
         """
         try:
             height, width = image.shape[:2]
@@ -1440,6 +1559,37 @@ class IntersectionDetector(SmartyNode):
                         color,
                         1,
                     )
+
+            # Draw overall confidence at bottom
+            conf_y_start = buffer_y_start + buffer_height + 15
+            conf_color = (50, 50, 50)
+            overlay = image.copy()
+            cv2.rectangle(
+                overlay,
+                (buffer_x, conf_y_start),
+                (buffer_x + buffer_width, conf_y_start + 25),
+                conf_color,
+                -1,
+            )
+            cv2.addWeighted(overlay, 0.4, image, 0.6, 0, image)
+
+            # Color based on overall confidence
+            if overall_confidence < 0.3:
+                conf_color = (0, 0, 255)  # Red
+            elif overall_confidence < 0.6:
+                conf_color = (0, 165, 255)  # Orange
+            else:
+                conf_color = (0, 255, 0)  # Green
+
+            cv2.putText(
+                image,
+                f"Overall: {overall_confidence:.2f}",
+                (buffer_x + 5, conf_y_start + 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.4,
+                conf_color,
+                1,
+            )
 
         except Exception:
             pass
@@ -4567,7 +4717,7 @@ class IntersectionDetector(SmartyNode):
             stop_line_right,
             max_y_diff=300.0,
             min_y_diff=100,
-            max_x_separation=360.0,
+            max_x_separation=380.0,
             min_x_separation=280.0,
         )
         # Reset labels if pairs were invalidated
@@ -5038,11 +5188,18 @@ class IntersectionDetector(SmartyNode):
         crossing_type = self.intersection_aggregator.get_crossing_type()
         is_stable = self.intersection_aggregator.is_crossing_stable()
         buffer_levels = self.intersection_aggregator.get_buffer_levels()
-        self.get_logger().info(f"Aggregated crossing type: {crossing_type}")
+        overall_confidence = self.intersection_aggregator.get_overall_confidence()
+        stability_scores = self.intersection_aggregator.get_stability_score()
+
+        self.get_logger().info(
+            f"Aggregated crossing type: {crossing_type} | "
+            f"Confidence: {overall_confidence:.2f} | "
+            f"Stability: {stability_scores['overall']:.2f}"
+        )
 
         # Draw crossing type visualization in top right corner
         self._draw_crossing_type_visualization(
-            debug_image, crossing_type, is_stable, buffer_levels
+            debug_image, crossing_type, is_stable, buffer_levels, overall_confidence
         )
 
         # save debug image and return image + result list
