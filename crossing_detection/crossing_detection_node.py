@@ -124,8 +124,8 @@ class IntersectionAggregator:
         self.last_states = []
 
         # Multi-frame buffer history for stability scoring
-        # Track last 7 frames of buffer values for each line type
-        self.history_size = 7
+        # Track last 4 frames of buffer values for each line type
+        self.history_size = 4
         self.ego_history = deque(maxlen=self.history_size)
         self.opp_history = deque(maxlen=self.history_size)
         self.stop_left_history = deque(maxlen=self.history_size)
