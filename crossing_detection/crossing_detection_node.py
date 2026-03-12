@@ -46,7 +46,7 @@ class LaneType(IntEnum):
 
 
 # FILTERING_ROI_REL_RLTB = (0.80, 0, 0.12, 0.45)  # left, right, top, bottom
-FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.8)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.815)  # left, right, top, bottom
 
 
 class IntersectionAggregator:
@@ -715,6 +715,10 @@ class IntersectionDetector(SmartyNode):
         label=None,
         label2=None,
         closest_line_angle=None,
+        ego_ghost_cc=None,
+        opp_ghost_cc=None,
+        ego_clip_bounds=None,
+        opp_clip_bounds=None,
     ):
         """
         Draw all debug overlays at once on a provided image.
@@ -749,6 +753,36 @@ class IntersectionDetector(SmartyNode):
                 )
             except Exception:
                 pass
+
+        # Draw ghost crossing centers (for ego/opp line finding)
+        try:
+            if ego_ghost_cc is not None:
+                # Ego ghost CC: red circle with EGO label
+                cv2.circle(image, ego_ghost_cc, 6, RED, 2)
+                cv2.putText(
+                    image,
+                    "EGO_G",
+                    (ego_ghost_cc[0] - 15, ego_ghost_cc[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    RED,
+                    1,
+                )
+
+            if opp_ghost_cc is not None:
+                # Opp ghost CC: blue circle with OPP label
+                cv2.circle(image, opp_ghost_cc, 6, BLUE, 2)
+                cv2.putText(
+                    image,
+                    "OPP_G",
+                    (opp_ghost_cc[0] - 15, opp_ghost_cc[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    BLUE,
+                    1,
+                )
+        except Exception:
+            pass
 
         # draw detected corners as pink and orange crosses
         if detected_corners is not None and len(detected_corners) > 0:
@@ -929,6 +963,55 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             pass
 
+        # Draw clip bounds rectangles for ego and opp lines
+        try:
+            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
+            roi_w = roi_right - roi_left
+
+            if ego_clip_bounds is not None:
+                min_rel_ego, max_rel_ego = ego_clip_bounds
+                x_min = roi_left + roi_w * min_rel_ego
+                x_max = roi_left + roi_w * max_rel_ego
+                cv2.rectangle(
+                    image,
+                    (int(x_min), roi_top),
+                    (int(x_max), roi_bottom),
+                    CYAN,
+                    2,
+                )
+                cv2.putText(
+                    image,
+                    f"EGO [{min_rel_ego:.2f}-{max_rel_ego:.2f}]",
+                    (int(x_min) + 5, roi_top + 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    CYAN,
+                    1,
+                )
+
+            if opp_clip_bounds is not None:
+                min_rel_opp, max_rel_opp = opp_clip_bounds
+                x_min = roi_left + roi_w * min_rel_opp
+                x_max = roi_left + roi_w * max_rel_opp
+                cv2.rectangle(
+                    image,
+                    (int(x_min), roi_top),
+                    (int(x_max), roi_bottom),
+                    LIME,
+                    2,
+                )
+                cv2.putText(
+                    image,
+                    f"OPP [{min_rel_opp:.2f}-{max_rel_opp:.2f}]",
+                    (int(x_min) + 5, roi_top + 45),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    LIME,
+                    1,
+                )
+        except Exception:
+            pass
+
         # put labels if provided
         try:
             if label is not None:
@@ -1008,7 +1091,7 @@ class IntersectionDetector(SmartyNode):
         Returns:
             Image with edges detected.
         """
-        img = cv2.Canny(img, 50, 50)
+        img = cv2.Canny(img, 50, 75)
         # IntersectionDetector.show_image("Canny", img)
         return img
 
@@ -2643,18 +2726,44 @@ class IntersectionDetector(SmartyNode):
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
         try:
-            # Binarization using Otsu's method for camera/light independence.
-            # Otsu automatically finds optimal threshold by minimizing
-            # within-class variance - works across different cameras,
-            # lighting, and road conditions without parameter tweaking.
-            # This solves the WR normalization problem across different
-            # recordings.
+            # Adaptive thresholding for local noise robustness.
+            # Unlike Otsu (global), adaptive threshold compares each pixel
+            # to its local neighborhood mean. This prevents noise and light
+            # reflections from creating false "white" regions in small crops.
+            #
+            # THRESH_GAUSSIAN_C: threshold = mean of neighborhood - constant
+            # blockSize=15: Neighborhood size (must be odd)
+            # C=3: Subtraction constant (higher C = more pixels classified
+            #      as white; lower C = stricter threshold)
+            #
+            # IMPORTANT: When crop is mostly black, local mean is very low,
+            # so C could result in very low thresholds (e.g., 15 - 3 = 12).
+            # This causes false white classifications. Solution: apply a
+            # MINIMUM THRESHOLD of 50 after adaptive threshold to reject
+            # pixels that are genuinely dark.
+            #
+            # This is better than Otsu for local crops because:
+            # - Otsu fails on small crops with uneven illumination
+            # - Adaptive adjusts threshold locally (road + line variations)
+            # - Noise reflections stay local, don't affect global threshold
+            # - Min threshold prevents false positives in all-black regions
 
-            _, binary = cv2.threshold(gray, 0, 1, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+            adaptive_binary = cv2.adaptiveThreshold(
+                gray,
+                1,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                blockSize=15,
+                C=3,
+            )
+
+            # Apply minimum threshold to reject genuinely dark pixels
+            # Pixels < 100 in grayscale are rejected even if adaptive says white
+            binary = (gray >= 60).astype(np.uint8) & adaptive_binary
             binary = binary.astype(bool)
 
             # compute horizontal profile (white pixel count per column)
-            white_per_col = np.sum(binary, axis=0)  # white pixels per column
+            white_per_col = np.sum(binary, axis=0)
 
             # find segments of white pixels (gaps are where white_per_col == 0)
             gaps = 0
@@ -2881,6 +2990,115 @@ class IntersectionDetector(SmartyNode):
         ny2 = y1 + t1 * dy
 
         return np.array([[nx1, ny1, nx2, ny2]], dtype=np.float32)
+
+    def clip_opp_line_adaptive(
+        self, line, image, angle=None, min_rel_base=0.15, max_rel_base=0.4
+    ):
+        """
+        Clip opposite line to vertical bounds with adaptive X-range based.
+        on prominent angle.
+
+        Returns: (clipped_line, (min_rel, max_rel)) where min_rel and
+        max_rel are the normalized bounds used for clipping.
+
+        At 90° (straight): min_rel=0.15, max_rel=0.4
+        At 67° (right curve): min_rel=0.35, max_rel=0.65
+        Interpolates between these points based on angle.
+        """
+        if line is None or image is None:
+            return None, None
+
+        # Default to straight if no angle provided
+        if angle is None:
+            angle = 90.0
+
+        # Define angle-based X-range mapping
+        # At 90°: use base values (0.15 to 0.4, center of road)
+        # At 67°: use right-shifted values (0.35 to 0.65, right side)
+        # Interpolate linearly between these points
+
+        if angle < 90.0:
+            # Straight or left turn: use default base values
+            # Right turn (angle < 90°): shift right
+            # At 67°: min_rel=0.35, max_rel=0.65
+            # Linear interpolation from 90° to 67°
+            angle_factor = (90.0 - angle) / (90.0 - 70.0)
+            # 0.0 at 90°, 1.0 at 67°
+            angle_factor = min(1.0, max(0.0, angle_factor))  # Clamp to [0, 1]
+
+            min_rel = min_rel_base + angle_factor * (0.05 - min_rel_base)
+            max_rel = max_rel_base + angle_factor * (0.25 - max_rel_base)
+
+        else:
+            # Right turn (angle < 90°): shift right
+            # At 67°: min_rel=0.35, max_rel=0.65
+            # Linear interpolation from 90° to 67°
+            angle_factor = (90.0 - angle) / (90.0 - 110.0)
+            # 0.0 at 90°, 1.0 at 67°
+            angle_factor = min(1.0, max(0.0, angle_factor))  # Clamp to [0, 1]
+
+            min_rel = min_rel_base + angle_factor * (0.48 - min_rel_base)
+            max_rel = max_rel_base + angle_factor * (0.70 - max_rel_base)
+
+        # Use standard clip function with adaptive bounds
+        clipped_line = self.clip_line_to_vertical_bounds(
+            line, image, min_rel=min_rel, max_rel=max_rel
+        )
+        return clipped_line, (min_rel, max_rel)
+
+    def clip_ego_line_adaptive(
+        self, line, image, angle=None, min_rel_base=0.5, max_rel_base=0.75
+    ):
+        """
+        Clip ego line to vertical bounds with adaptive X-range based.
+        on prominent angle (opposite direction to opp line).
+
+        Returns: (clipped_line, (min_rel, max_rel)) where min_rel and
+        max_rel are the normalized bounds used for clipping.
+
+        At 90° (straight): min_rel=0.5, max_rel=0.75
+        At 113° (left curve): min_rel=0.25, max_rel=0.55
+        Interpolates between these points based on angle.
+        """
+        if line is None or image is None:
+            return None, None
+
+        # Default to straight if no angle provided
+        if angle is None:
+            angle = 90.0
+
+        # Define angle-based X-range mapping (opposite direction to opp line)
+        # At 90°: use base values (0.5 to 0.75, center-right)
+        # At 113°: use left-shifted values (0.25 to 0.55, left side)
+        # Interpolate linearly between these points
+
+        if angle <= 90.0:
+            # Straight or right turn: use default base values or shift right
+            # At 67°: min_rel=0.6, max_rel=0.85
+            # Linear interpolation from 90° to 67°
+            angle_factor = (90.0 - angle) / (90.0 - 70.0)
+            # 0.0 at 90°, 1.0 at 67°
+            angle_factor = min(1.0, max(0.0, angle_factor))  # Clamp to [0, 1]
+
+            min_rel = min_rel_base + angle_factor * (0.42 - min_rel_base)
+            max_rel = max_rel_base + angle_factor * (0.60 - max_rel_base)
+
+        else:
+            # Left turn (angle > 90°): shift left
+            # At 113°: min_rel=0.25, max_rel=0.55
+            # Linear interpolation from 90° to 113°
+            angle_factor = (angle - 90.0) / (110.0 - 90.0)
+            # 0.0 at 90°, 1.0 at 110°
+            angle_factor = min(1.0, max(0.0, angle_factor))  # Clamp to [0, 1]
+
+            min_rel = min_rel_base - angle_factor * (min_rel_base - 0.55)
+            max_rel = max_rel_base - angle_factor * (max_rel_base - 0.8)
+
+        # Use standard clip function with adaptive bounds
+        clipped_line = self.clip_line_to_vertical_bounds(
+            line, image, min_rel=min_rel, max_rel=max_rel
+        )
+        return clipped_line, (min_rel, max_rel)
 
     def find_intersections(self, lines1, lines2):
         """
@@ -3425,15 +3643,22 @@ class IntersectionDetector(SmartyNode):
 
         return (new_x, new_y)
 
-    def find_opp_line(self, horiz_lines, crossing_center):
+    def find_opp_line(self, horiz_lines, crossing_center, ghost_cc=None):
         """
-        Find the ego line from the list of lines.
+        Find the opposite line from the list of lines.
+
+        Uses ghost_cc if provided, otherwise falls back to crossing_center.
 
         Arguments:
-            lines -- List of lines as pairs of points.
+            horiz_lines -- List of horizontal lines as pairs of points.
+            crossing_center -- Main crossing center (x, y)
+            ghost_cc -- Optional ghost crossing center for opp line search
         """
         max_distance = 10000
         nearest_line = None
+
+        # Use ghost_cc if available, otherwise use main crossing_center
+        search_center = ghost_cc if ghost_cc is not None else crossing_center
 
         line_candidates = []
 
@@ -3441,23 +3666,20 @@ class IntersectionDetector(SmartyNode):
             x1, y1, x2, y2 = line[0]
             line_center = ((x1 + x2) / 2, (y1 + y2) / 2)
 
-            if (
-                line_center[1] < crossing_center[1]
-                and line_center[0] < crossing_center[0]
-            ):
+            if line_center[1] < crossing_center[1]:
                 line_candidates.append(line)
 
         for line in line_candidates:
             x1, y1, x2, y2 = line[0]
             line_center = ((x1 + x2) / 2, (y1 + y2) / 2)
 
-            distance_to_crossing_center = math.sqrt(
-                (line_center[0] - crossing_center[0]) ** 2
-                + (line_center[1] - crossing_center[1]) ** 2
+            distance_to_search_center = math.sqrt(
+                (line_center[0] - search_center[0]) ** 2
+                + (line_center[1] - search_center[1]) ** 2
             )
 
-            if distance_to_crossing_center < max_distance:
-                max_distance = distance_to_crossing_center
+            if distance_to_search_center < max_distance:
+                max_distance = distance_to_search_center
                 nearest_line = line
 
         # return none if line smaller than 80
@@ -3467,15 +3689,75 @@ class IntersectionDetector(SmartyNode):
                 return None
         return nearest_line
 
-    def find_ego_line(self, horiz_lines, crossing_center):
+    def calculate_ghost_crossing_centers(
+        self, crossing_center, prominent_angle, offset_distance: float = 85.0
+    ):
+        """
+        Calculate ghost crossing centers offset from main crossing center.
+
+        Projects two points from the main crossing center along the prominent
+        angle direction:
+        - ego_ghost_cc: 70px backward (opposite direction)
+        - opp_ghost_cc: 70px forward (same direction)
+
+        This helps find ego/opp lines that are not in the middle of the road.
+
+        Arguments:
+            crossing_center -- Main crossing center (x, y)
+            prominent_angle -- Angle in degrees (0-180)
+            offset_distance -- How far to offset (default 70px)
+
+        Returns:
+            Tuple of (ego_ghost_cc, opp_ghost_cc) as (x, y) tuples,
+            or (None, None) if angle is not available
+        """
+        if crossing_center is None or prominent_angle is None:
+            return None, None
+
+        try:
+            # Convert angle to radians
+            # Angle of 90 = vertical (pointing up)
+            # Angle of 0/180 = horizontal (pointing left/right)
+            angle_rad = math.radians(float(prominent_angle))
+
+            # Calculate direction vector
+            dx = math.cos(angle_rad)
+            dy = math.sin(angle_rad)
+
+            cx, cy = crossing_center
+
+            # OPP ghost: 70px forward along the angle
+            opp_ghost_x = cx - dx * offset_distance
+            opp_ghost_y = cy - dy * offset_distance
+            opp_ghost_cc = (int(opp_ghost_x), int(opp_ghost_y))
+
+            # EGO ghost: 70px backward (opposite direction)
+            ego_ghost_x = cx + dx * offset_distance
+            ego_ghost_y = cy + dy * offset_distance
+            ego_ghost_cc = (int(ego_ghost_x + 20), int(ego_ghost_y))
+
+            return ego_ghost_cc, opp_ghost_cc
+
+        except Exception as e:
+            self.get_logger().error(f"Error calculating ghost CCs: {e}")
+            return None, None
+
+    def find_ego_line(self, horiz_lines, crossing_center, ghost_cc=None):
         """
         Find the ego line from the list of lines.
 
+        Uses ghost_cc if provided, otherwise falls back to crossing_center.
+
         Arguments:
-            lines -- List of lines as pairs of points.
+            horiz_lines -- List of horizontal lines as pairs of points.
+            crossing_center -- Main crossing center (x, y)
+            ghost_cc -- Optional ghost crossing center for ego line search
         """
         max_distance = 10000
         nearest_line = None
+
+        # Use ghost_cc if available, otherwise use main crossing_center
+        search_center = ghost_cc if ghost_cc is not None else crossing_center
 
         lines_candidates = []
 
@@ -3489,13 +3771,13 @@ class IntersectionDetector(SmartyNode):
         for line in lines_candidates:
             x1, y1, x2, y2 = line[0]
             line_center = ((x1 + x2) / 2, (y1 + y2) / 2)
-            distance_to_crossing_center = math.sqrt(
-                (line_center[0] - crossing_center[0]) ** 2
-                + (line_center[1] - crossing_center[1]) ** 2
+            distance_to_search_center = math.sqrt(
+                (line_center[0] - search_center[0]) ** 2
+                + (line_center[1] - search_center[1]) ** 2
             )
 
-            if distance_to_crossing_center < max_distance:
-                max_distance = distance_to_crossing_center
+            if distance_to_search_center < max_distance:
+                max_distance = distance_to_search_center
                 nearest_line = line
 
         if nearest_line is not None:
@@ -3511,7 +3793,7 @@ class IntersectionDetector(SmartyNode):
         ego_line,
         intersection_point,
         line_horizontal_distance_threshold: float = 100.0,
-        line_vertical_distance_threshold: float = 80.0,
+        line_vertical_distance_threshold: float = 150.0,
         center_horizontal_distance_threshold: float = 100.0,
         negative_line_overlap_threshold: float = -80.0,
     ):
@@ -4325,6 +4607,43 @@ class IntersectionDetector(SmartyNode):
 
         return filtered
 
+    def is_line_in_quadrant(self, line, quadrant):
+        """
+        Check if a line is contained within a quadrant polygon.
+
+        A line is considered "in" a quadrant if both endpoints are inside
+        or on the edge of the quadrant polygon.
+
+        Arguments:
+            line -- Line as numpy array [[x1, y1, x2, y2]]
+            quadrant -- Quadrant as list of 4 corner points
+
+        Returns:
+            True if both line endpoints are in the quadrant, False otherwise
+        """
+        if line is None or quadrant is None:
+            return False
+
+        try:
+            nl = self._normalize_line(line)
+            if nl is None:
+                return False
+
+            x1, y1, x2, y2 = nl[0].astype(int)
+
+            # Convert quadrant to numpy array for cv2.pointPolygonTest
+            poly = np.array(quadrant, dtype=np.int32)
+
+            # pointPolygonTest returns >0 inside, 0 on edge, <0 outside
+            # We accept both inside (>0) and on edge (0)
+            d1 = cv2.pointPolygonTest(poly, (int(x1), int(y1)), False)
+            d2 = cv2.pointPolygonTest(poly, (int(x2), int(y2)), False)
+
+            # Both endpoints must be in or on the quadrant
+            return d1 >= 0 and d2 >= 0
+        except Exception:
+            return False
+
     def pipeline(self, image):
         """
         Complete processing pipeline for intersection detection.
@@ -4378,9 +4697,9 @@ class IntersectionDetector(SmartyNode):
             fused_lines, angle_tol_deg=5, center_dist_tol=120
         )
 
-        fused_lines = self.fuse_similar_lines(
-            fused_lines, angle_tol_deg=5, center_dist_tol=25
-        )
+        # fused_lines = self.fuse_similar_lines(
+        #    fused_lines, angle_tol_deg=5, center_dist_tol=25
+        # )
 
         closest_line_angle = None
         if fused_lines is not None and len(fused_lines) > 0:
@@ -4442,7 +4761,7 @@ class IntersectionDetector(SmartyNode):
                 # Accept if error < 20° or valid rectangle
                 is_rect = self.is_valid_rectangle(interior_angles, angle_tolerance=20.0)
 
-                if corner_error < 20.0 or is_rect:
+                if corner_error < 30.0 or is_rect:
                     center = np.mean(sorted_corners, axis=0).astype(int)
                     # Start new 4-frame hold period
                     self.detected_crossing_center = tuple(center)
@@ -4513,7 +4832,7 @@ class IntersectionDetector(SmartyNode):
             )
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-            min_wr = 15 if stop_dotted_left else 30
+            min_wr = 25 if stop_dotted_left else 30
 
             # Check extension for left stop line
             (
@@ -4554,7 +4873,7 @@ class IntersectionDetector(SmartyNode):
             )
             # Validate: Check if dotted or solid with appropriate thresholds
             # Dotted: wr >= 10%, Solid: wr >= 22% (percentage-based)
-            min_wr = 15 if stop_dotted_right else 30
+            min_wr = 25 if stop_dotted_right else 30
 
             # Check extension for right stop line
             (
@@ -4572,9 +4891,13 @@ class IntersectionDetector(SmartyNode):
 
             if white_ratio_right >= min_wr and line_right_ext_passed:
                 label_stop_line_right = (
-                    f"STOP_RIGHT DOTTED (g={gap_count_right} wr={white_ratio_right:.1f}%)"
+                    f"STOP_RIGHT DOTTED "
+                    f"(g={gap_count_right} wr={white_ratio_right:.1f}%)"
                     if stop_dotted_right
-                    else f"STOP_RIGHT SOLID (g={gap_count_right} wr={white_ratio_right:.1f}%)"
+                    else (
+                        f"STOP_RIGHT SOLID "
+                        f"(g={gap_count_right} wr={white_ratio_right:.1f}%)"
+                    )
                 )
             else:
                 stop_line_right = None
@@ -4738,19 +5061,33 @@ class IntersectionDetector(SmartyNode):
         pair_plausible = False
         label_ego = None
         label_opp = None
+        ego_ghost_cc = None
+        opp_ghost_cc = None
+        ego_clip_bounds = None
+        opp_clip_bounds = None
 
         # Only attempt to find ego/opp lines if we have a valid crossing center.
         if crossing_center is not None:
-            ego_line = self.find_ego_line(horiz, crossing_center)
-            opp_line = self.find_opp_line(horiz, crossing_center)
+            # Calculate ghost crossing centers for better line finding
+            ego_ghost_cc, opp_ghost_cc = self.calculate_ghost_crossing_centers(
+                crossing_center, closest_line_angle
+            )
+
+            # Find lines using ghost CCs if available
+            ego_line = self.find_ego_line(horiz, crossing_center, ghost_cc=ego_ghost_cc)
+            opp_line = self.find_opp_line(horiz, crossing_center, ghost_cc=opp_ghost_cc)
 
             print(f"Initial ego line: {ego_line}, opp line: {opp_line}")
 
             if ego_line is not None:
                 # Elongate and clip ego line to ROI band
                 ego_line_long = self.elongate_line(ego_line)
-                clipped_ego = self.clip_line_to_vertical_bounds(
-                    ego_line_long, image, min_rel=0.5, max_rel=0.75
+                clipped_ego, ego_clip_bounds = self.clip_ego_line_adaptive(
+                    ego_line_long,
+                    image,
+                    angle=closest_line_angle,
+                    min_rel_base=0.5,
+                    max_rel_base=0.75,
                 )
 
                 (
@@ -4766,9 +5103,27 @@ class IntersectionDetector(SmartyNode):
                     min_gap_count=3,
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
-                # Dotted: wr >= 10%, Solid: wr >= 30% (percentage-based)
-                min_wr = 13.0 if ego_dotted else 23.0
-                print(f"EGO LINE: g={ego_gap_count} wr={wr_ego:.1f}%")
+                # ADAPTIVE: If coming from angle (angle != 0°), lower minimum WR
+                # to 30% (for dotted) or 30% (for solid) to account for
+                # perspective distortion reducing WR
+
+                # If coming from significant angle, use lower WR threshold (30%)
+                # Otherwise use normal thresholds (35% for solid)
+                angle_deviation = (
+                    abs(90 - closest_line_angle)
+                    if closest_line_angle is not None
+                    else 0.0
+                )
+                is_angled_approach = angle_deviation > 15.0  # > 25° off perpendicular
+                min_wr_ego_dotted = 20.0  # Dotted unchanged
+                min_wr_ego_solid = 20.0 if is_angled_approach else 35.0
+                min_wr_ego = min_wr_ego_dotted if ego_dotted else min_wr_ego_solid
+
+                print(
+                    f"EGO LINE: g={ego_gap_count} wr={wr_ego:.1f}% "
+                    f"(angle_dev={angle_deviation:.1f}°, "
+                    f"min_wr={min_wr_ego:.0f}%)"
+                )
 
                 # Check both left and right extensions
                 (
@@ -4805,8 +5160,13 @@ class IntersectionDetector(SmartyNode):
                     in_roi_x = (
                         roi_left <= x1 <= roi_right and roi_left <= x2 <= roi_right
                     )
-                    in_roi_y = (
-                        roi_top <= y1 <= roi_bottom and roi_top <= y2 <= roi_bottom
+                    # Allow 15px tolerance for Y bounds (ego line may slightly
+                    # exceed ROI bounds)
+                    y_tolerance = 10
+                    y_min_tol = roi_top - y_tolerance
+                    y_max_tol = roi_bottom + y_tolerance
+                    in_roi_y = (y_min_tol <= y1 <= y_max_tol) and (
+                        y_min_tol <= y2 <= y_max_tol
                     )
 
                     # Check distance from line center to crossing center
@@ -4823,9 +5183,10 @@ class IntersectionDetector(SmartyNode):
                     )
 
                 if (
-                    wr_ego >= min_wr
+                    wr_ego >= min_wr_ego
                     and ego_extension_check_passed
                     and (ego_roi_and_distance_check)
+                    and ego_gap_count <= 3
                 ):
                     label_ego = (
                         f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
@@ -4843,9 +5204,10 @@ class IntersectionDetector(SmartyNode):
 
             if opp_line is not None:
                 # Elongate and clip opposite line to ROI band
+                # with adaptive X-range based on prominent angle
                 opp_line_long = self.elongate_line(opp_line)
-                clipped_opp = self.clip_line_to_vertical_bounds(
-                    opp_line_long, image, min_rel=0.15, max_rel=0.4
+                clipped_opp, opp_clip_bounds = self.clip_opp_line_adaptive(
+                    opp_line_long, image, angle=closest_line_angle
                 )
 
                 (
@@ -4862,8 +5224,34 @@ class IntersectionDetector(SmartyNode):
                 )
                 # Validate: Check if dotted or solid with appropriate thresholds
                 # Dotted: wr >= 10%, Solid: wr >= 30% (percentage-based)
-                min_wr = 13.0 if opp_dotted else 23.0
-                print(f"OPP LINE: g={opp_gap_count} wr={wr_opp:.1f}%")
+                # ADAPTIVE: If coming from angle (angle != 0°), lower minimum WR
+                # to 28% to account for perspective distortion reducing WR
+
+                # Calculate angle deviation from perpendicular (0° = straight ahead)
+                angle_deviation = 0.0
+                if closest_line_angle is not None:
+                    # Normalize angle to [-90, 90] range where 0 = perpendicular
+                    normalized_angle = closest_line_angle
+                    if normalized_angle > 90:
+                        normalized_angle = 180 - normalized_angle
+                    # Deviation is how far from 0° (straight)
+                    angle_deviation = abs(normalized_angle)
+
+                # If coming from significant angle, use lower WR threshold (28%)
+                # Otherwise use normal threshold (35%)
+                is_angled_approach = angle_deviation > 15.0  # > 15° off perpendicular
+                min_wr_opp = 28.0 if is_angled_approach else 35.0
+
+                print(
+                    f"OPP LINE: g={opp_gap_count} wr={wr_opp:.1f}% "
+                    f"(angle_dev={angle_deviation:.1f}°, "
+                    f"min_wr={min_wr_opp:.0f}%)"
+                )
+
+                # Check if OPP line is in Q1 or Q2 (top quadrants)
+                q1q2 = [q1[0], q2[1], q2[2], q1[3]]  # Combine Q1 and Q2 corners
+                opp_location_valid = self.is_line_in_quadrant(clipped_opp, q1q2)
+                print(f"valid={opp_location_valid}")
 
                 opp_line_extended = None
                 # Check if line passes validation and extension test
@@ -4882,7 +5270,12 @@ class IntersectionDetector(SmartyNode):
                     not opp_check_fail if clipped_opp is not None else False
                 )
 
-                if wr_opp >= min_wr and opp_extension_check_passed:
+                # OPP line must pass: WR check, extension check, AND Q1 check
+                if (
+                    wr_opp >= min_wr_opp
+                    and opp_extension_check_passed
+                    and opp_location_valid
+                ):
                     label_opp = (
                         f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.1f}%)"
                         if opp_dotted
@@ -5011,6 +5404,10 @@ class IntersectionDetector(SmartyNode):
             label=label_ego,
             label2=label_opp,
             closest_line_angle=closest_line_angle,
+            ego_ghost_cc=ego_ghost_cc,
+            opp_ghost_cc=opp_ghost_cc,
+            opp_clip_bounds=opp_clip_bounds,
+            ego_clip_bounds=ego_clip_bounds,
         )
 
         # Draw ROI quadrants
