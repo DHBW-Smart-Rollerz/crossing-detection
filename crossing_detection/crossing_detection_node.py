@@ -4699,18 +4699,26 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             return False
 
-    def pipeline(self, image):
+    def preprocess_image(self, image):
         """
-        Complete processing pipeline for intersection detection.
+        Preprocess image with filtering, morphological operations, and cleanup.
+
+        This method applies a series of image processing steps to prepare
+        the image for line detection and crossing identification.
 
         Arguments:
-            img_path -- Path to the input image.
-        """
-        orig_image = image.copy()
+            image -- Input image (BGR or grayscale)
 
+        Returns:
+            Tuple of:
+                - image: Processed image after all preprocessing
+                - enhanced_image: Brightness-enhanced image (if created)
+        """
+        # Noise reduction with bilateral filter (edge-preserving)
         image = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
         image = cv2.medianBlur(image, 7)
 
+        # Morphological operations to remove small noise
         image = cv2.morphologyEx(
             image, cv2.MORPH_OPEN, kernel=np.ones((5, 5), np.uint8), iterations=1
         )
@@ -4719,25 +4727,20 @@ class IntersectionDetector(SmartyNode):
         )
         image = cv2.dilate(image, kernel=np.ones((4, 4), np.uint8), iterations=2)
 
-        q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
+        # Detect edges and lines
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
-        # normalize detected lines to canonical numpy (1,4) arrays
+        # Normalize detected lines to canonical numpy (1,4) arrays
         transformed_lines = self._normalize_lines(transformed_lines)
 
+        # Filter lines by length and ROI
         filtered_lines = self.filter_by_length(transformed_lines, min_length=20)
-        # image = self._draw_lines(image, filtered_lines, color=BLUE)
-        # image = self._draw_lines(image, filtered_lines, color=YELLOW)
         filtered_lines = self.filter_by_roi(filtered_lines, image.shape)
-        # image = self._draw_lines(image, filtered_lines, color=GREEN)
 
-        enhanced_image = None
         if filtered_lines and len(filtered_lines) > 0:
-            enhanced_image = self._enhance_by_line_brightness(
+            image = self._enhance_by_line_brightness(
                 image, filtered_lines, percentile=90
             )
-            image = enhanced_image
-            # Save enhanced image for display in corner
 
         # Enhance contrast to make whites whiter and darks darker
         if len(image.shape) == 3:
@@ -4746,6 +4749,7 @@ class IntersectionDetector(SmartyNode):
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(30, 30))
         image = clahe.apply(image)
 
+        # Remove small connected components (noise) with area < 60
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
             image, connectivity=8
         )
@@ -4757,14 +4761,28 @@ class IntersectionDetector(SmartyNode):
                 output_image[labels == label] = image[labels == label]
         image = output_image
 
-        lines = self.line_segment_detector(
-            enhanced_image if enhanced_image is not None else image
-        )
+        return image
+
+    def pipeline(self, image):
+        """
+        Complete processing pipeline for intersection detection.
+
+        Arguments:
+            img_path -- Path to the input image.
+        """
+        orig_image = image.copy()
+
+        # Perform image preprocessing
+        image = self.preprocess_image(image)
+        enhanced_image = image
+
+        q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
+
+        lines = self.line_segment_detector(image)
         lines = self._normalize_lines(lines)
         lines = self.filter_by_length(lines, min_length=20)
         filtered_lines = self.filter_by_roi(lines, image.shape)
 
-        # Fuse similar lines that belong to the same stop line
         fused_lines = self.fuse_similar_lines(
             filtered_lines, angle_tol_deg=10, center_dist_tol=100
         )
