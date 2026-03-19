@@ -719,6 +719,7 @@ class IntersectionDetector(SmartyNode):
         opp_ghost_cc=None,
         ego_clip_bounds=None,
         opp_clip_bounds=None,
+        enhanced_image=None,
     ):
         """
         Draw all debug overlays at once on a provided image.
@@ -1037,7 +1038,7 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             pass
 
-        # draw roi box and legend
+        # draw roi box
         try:
             roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
             cv2.rectangle(
@@ -1046,20 +1047,6 @@ class IntersectionDetector(SmartyNode):
                 (roi_right, roi_bottom),
                 RED,
                 2,
-            )
-            image = self._draw_legend(
-                image,
-                [
-                    ("Transformed lines", MAGENTA),
-                    ("Vertical lines", GOLD),
-                    ("Ego line", LIME),
-                    ("Opp plausible", LIME),
-                    ("Opp implausible", ORANGE),
-                    ("Stop lines", VIOLET),
-                    ("Crossing center", YELLOW),
-                    ("Center (ROI)", TURQUOISE),
-                    ("Corners", CYAN),
-                ],
             )
         except Exception:
             pass
@@ -1360,6 +1347,72 @@ class IntersectionDetector(SmartyNode):
             out[top:bottom, left:right] = dilated
 
         return out
+
+    def _enhance_by_line_brightness(self, image, lines, percentile=80):
+        """
+        Enhance image contrast based on detected line brightness.
+
+        Samples pixels from detected lines, computes the 80th percentile
+        brightness, then applies sigmoid-based contrast enhancement where:
+        - Pixels below percentile become darker
+        - Pixels above percentile become brighter
+        - Uses sigmoid function for smooth transition
+
+        Arguments:
+            image -- Grayscale image
+            lines -- List of detected lines [[x1,y1,x2,y2], ...]
+            percentile -- Brightness percentile to use as threshold (default 80)
+
+        Returns:
+            Contrast-enhanced image
+        """
+        if image is None or lines is None or len(lines) == 0:
+            return image
+
+        # Convert to grayscale if needed
+        if image.ndim == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+
+        # Sample all pixels that lie on any detected line
+        line_pixels = []
+        h, w = gray.shape[:2]
+
+        for line in lines:
+            nl = self._normalize_line(line)
+            if nl is None:
+                continue
+
+            x1, y1, x2, y2 = nl[0].astype(int)
+
+            # Sample points along the line
+            num_samples = 50
+            for i in range(num_samples):
+                t = i / (num_samples - 1) if num_samples > 1 else 0
+                px = int(x1 + t * (x2 - x1))
+                py = int(y1 + t * (y2 - y1))
+                if 0 <= px < w and 0 <= py < h:
+                    line_pixels.append(int(gray[py, px]))
+
+        # If no pixels sampled, return original
+        if len(line_pixels) == 0:
+            return image
+
+        # Calculate 90th percentile brightness
+        threshold = np.percentile(line_pixels, percentile)
+        print(f"Line brightness 90th percentile: {threshold:.1f}")
+
+        # Apply sigmoid-based contrast enhancement
+        # Sigmoid centered at threshold, stretched over ~±50 range
+        img_float = gray.astype(np.float32)
+        normalized = (img_float - threshold) / 50.0  # Normalize around threshold
+        enhanced = 1.0 / (1.0 + np.exp(-normalized))  # Sigmoid: S-curve
+        enhanced = (enhanced * 255).astype(np.uint8)  # Scale back to 0-255
+
+        print(f"Applied sigmoid enhancement centered at {threshold:.1f}")
+
+        return enhanced
 
     def get_roi_bbox(self, img_shape):
         """
@@ -2726,30 +2779,32 @@ class IntersectionDetector(SmartyNode):
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
         try:
-            # Adaptive thresholding for local noise robustness.
-            # Unlike Otsu (global), adaptive threshold compares each pixel
-            # to its local neighborhood mean. This prevents noise and light
-            # reflections from creating false "white" regions in small crops.
-            #
-            # THRESH_GAUSSIAN_C: threshold = mean of neighborhood - constant
-            # blockSize=15: Neighborhood size (must be odd)
-            # C=3: Subtraction constant (higher C = more pixels classified
-            #      as white; lower C = stricter threshold)
-            #
-            # IMPORTANT: When crop is mostly black, local mean is very low,
-            # so C could result in very low thresholds (e.g., 15 - 3 = 12).
-            # This causes false white classifications. Solution: apply a
-            # MINIMUM THRESHOLD of 50 after adaptive threshold to reject
-            # pixels that are genuinely dark.
-            #
-            # This is better than Otsu for local crops because:
-            # - Otsu fails on small crops with uneven illumination
-            # - Adaptive adjusts threshold locally (road + line variations)
-            # - Noise reflections stay local, don't affect global threshold
-            # - Min threshold prevents false positives in all-black regions
+            # Use Canny to find potential line edges/white regions in the crop
+            canny_edges = cv2.Canny(gray, threshold1=50, threshold2=150)
 
+            # Get pixel values from original crop where Canny detected edges
+            # This gives us the actual intensities at those locations
+            gray_float = gray.astype(np.float32)
+
+            # Calculate median intensity using ONLY white pixels from Canny
+            # This prevents black background pixels from skewing the threshold
+            white_pixels = gray_float[canny_edges > 0]
+            if len(white_pixels) > 0:
+                median_intensity = np.median(white_pixels)
+            else:
+                median_intensity = np.median(gray_float)
+
+            # Apply sigmoid-based contrast enhancement to suppress grays
+            # and boost whites (similar to main pipeline enhancement)
+            # Sigmoid centered at median white intensity, stretched over ~±50
+            normalized = (gray_float - median_intensity) / 50.0
+            sigmoid_enhanced = 1.0 / (1.0 + np.exp(-normalized))
+            sigmoid_enhanced = (sigmoid_enhanced * 255).astype(np.uint8)
+
+            # Apply adaptive thresholding on the sigmoid-enhanced crop
+            # for local noise robustness
             adaptive_binary = cv2.adaptiveThreshold(
-                gray,
+                sigmoid_enhanced,
                 1,
                 cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY,
@@ -4651,30 +4706,18 @@ class IntersectionDetector(SmartyNode):
         Arguments:
             img_path -- Path to the input image.
         """
-        # image = IntersectionDetector.load_img_grayscale(img_path)
-        # image = self.crop_image(image)
-
-        # keep a copy of the original image for rendering overlays later
         orig_image = image.copy()
 
-        # blur + optional closing on the upper half of the ROI to help LSD
-        # detect distorted bird's-eye parts
-        image = self._blur_roi_top(
-            image, ksize=(22, 22), sigmaX=0, do_close=True, close_kernel=(25, 3)
-        )
+        image = cv2.bilateralFilter(image, d=9, sigmaColor=75, sigmaSpace=75)
+        image = cv2.medianBlur(image, 7)
 
-        # apply lighter blur to the lower half of the ROI
-        image = self._blur_roi_bottom(
-            image, ksize=(5, 5), sigmaX=0, do_close=True, close_kernel=(10, 3)
+        image = cv2.morphologyEx(
+            image, cv2.MORPH_OPEN, kernel=np.ones((5, 5), np.uint8), iterations=1
         )
-
-        # Enhance distorted ROI areas (bird's eye view distortion)
-        image = self._enhance_distorted_roi(
-            image,
-            do_roi_top=True,
-            morph_kernel_size=self.enhance_distortion_kernel,
-            dilation_iterations=self.enhance_distortion_dilations,
+        image = cv2.morphologyEx(
+            image, cv2.MORPH_CLOSE, kernel=np.ones((8, 8), np.uint8), iterations=1
         )
+        image = cv2.dilate(image, kernel=np.ones((4, 4), np.uint8), iterations=2)
 
         q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
         edges = self.perform_canny(image)
@@ -4688,14 +4731,47 @@ class IntersectionDetector(SmartyNode):
         filtered_lines = self.filter_by_roi(filtered_lines, image.shape)
         # image = self._draw_lines(image, filtered_lines, color=GREEN)
 
+        enhanced_image = None
+        if filtered_lines and len(filtered_lines) > 0:
+            enhanced_image = self._enhance_by_line_brightness(
+                image, filtered_lines, percentile=90
+            )
+            image = enhanced_image
+            # Save enhanced image for display in corner
+
+        # Enhance contrast to make whites whiter and darks darker
+        if len(image.shape) == 3:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        image = np.uint8(image)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(30, 30))
+        image = clahe.apply(image)
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            image, connectivity=8
+        )
+        # Create output image
+        output_image = np.zeros_like(image)
+        # Iterate through labels and keep only components with area >= 60
+        for label in range(1, num_labels):  # Skip background (label 0)
+            if stats[label, cv2.CC_STAT_AREA] >= 60:
+                output_image[labels == label] = image[labels == label]
+        image = output_image
+
+        lines = self.line_segment_detector(
+            enhanced_image if enhanced_image is not None else image
+        )
+        lines = self._normalize_lines(lines)
+        lines = self.filter_by_length(lines, min_length=20)
+        filtered_lines = self.filter_by_roi(lines, image.shape)
+
         # Fuse similar lines that belong to the same stop line
         fused_lines = self.fuse_similar_lines(
-            filtered_lines, angle_tol_deg=15, center_dist_tol=100
+            filtered_lines, angle_tol_deg=10, center_dist_tol=100
         )
 
-        fused_lines = self.fuse_similar_lines(
-            fused_lines, angle_tol_deg=5, center_dist_tol=120
-        )
+        # fused_lines = self.fuse_similar_lines(
+        #    fused_lines, angle_tol_deg=5, center_dist_tol=120
+        # )
 
         # fused_lines = self.fuse_similar_lines(
         #    fused_lines, angle_tol_deg=5, center_dist_tol=25
@@ -4715,6 +4791,8 @@ class IntersectionDetector(SmartyNode):
             tol_deg=5,
         )
 
+        # Enhance image contrast based on detected line brightness
+        # This makes lane markings more visible
         # compute crossing center optionally; if disabled, use ROI center
         crossing_center = None
         if getattr(self, "compute_crossing_center", True):
@@ -5186,7 +5264,7 @@ class IntersectionDetector(SmartyNode):
                     wr_ego >= min_wr_ego
                     and ego_extension_check_passed
                     and (ego_roi_and_distance_check)
-                    and ego_gap_count <= 3
+                    and ego_gap_count <= 4
                 ):
                     label_ego = (
                         f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
@@ -5406,8 +5484,9 @@ class IntersectionDetector(SmartyNode):
             closest_line_angle=closest_line_angle,
             ego_ghost_cc=ego_ghost_cc,
             opp_ghost_cc=opp_ghost_cc,
-            opp_clip_bounds=opp_clip_bounds,
-            ego_clip_bounds=ego_clip_bounds,
+            opp_clip_bounds=None,
+            ego_clip_bounds=None,
+            enhanced_image=enhanced_image,
         )
 
         # Draw ROI quadrants
@@ -5423,6 +5502,15 @@ class IntersectionDetector(SmartyNode):
         if stop_line_right is not None:
             x1, y1, x2, y2 = [int(v) for v in stop_line_right[0]]
             cv2.line(debug_image, (x1, y1), (x2, y2), VIOLET, 2)
+
+        # Draw stop line extensions for debug visualization
+        if "stop_line_left_ext" in locals() and stop_line_left_ext is not None:
+            x1, y1, x2, y2 = [int(v) for v in stop_line_left_ext[0]]
+            cv2.line(debug_image, (x1, y1), (x2, y2), CYAN, 1)
+
+        if "stop_line_right_ext" in locals() and stop_line_right_ext is not None:
+            x1, y1, x2, y2 = [int(v) for v in stop_line_right_ext[0]]
+            cv2.line(debug_image, (x1, y1), (x2, y2), CYAN, 1)
 
         # Draw stop line pair validation metrics when both lines are valid
         if stop_line_left is not None and stop_line_right is not None:
@@ -5592,6 +5680,37 @@ class IntersectionDetector(SmartyNode):
         self._draw_crossing_type_visualization(
             debug_image, crossing_type, is_stable, buffer_levels, overall_confidence
         )
+
+        # Render enhanced image in bottom right corner (250px width)
+        if "enhanced_image" in locals() and enhanced_image is not None:
+            target_width = 250
+            aspect_ratio = enhanced_image.shape[0] / enhanced_image.shape[1]
+            target_height = int(target_width * aspect_ratio)
+
+            # Resize the enhanced image
+            resized_enhanced = cv2.resize(
+                enhanced_image,
+                (target_width, target_height),
+                interpolation=cv2.INTER_LINEAR,
+            )
+
+            # Convert to BGR if grayscale for overlay
+            if len(resized_enhanced.shape) == 2:
+                resized_enhanced = cv2.cvtColor(resized_enhanced, cv2.COLOR_GRAY2BGR)
+
+            # Calculate position (bottom right corner with margin)
+            margin = 5
+            x_pos = debug_image.shape[1] - target_width - margin
+            y_pos = debug_image.shape[0] - target_height - margin
+
+            # Ensure we don't go out of bounds
+            if x_pos >= 0 and y_pos >= 0:
+                try:
+                    debug_image[
+                        y_pos : y_pos + target_height, x_pos : x_pos + target_width
+                    ] = resized_enhanced
+                except Exception:
+                    pass  # Skip if dimensions don't match
 
         # save debug image and return image + result list
         # IntersectionDetector.save_img_to_dir(
