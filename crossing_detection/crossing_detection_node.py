@@ -717,6 +717,8 @@ class IntersectionDetector(SmartyNode):
         closest_line_angle=None,
         ego_ghost_cc=None,
         opp_ghost_cc=None,
+        left_stop_ghost_cc=None,
+        right_stop_ghost_cc=None,
         ego_clip_bounds=None,
         opp_clip_bounds=None,
         enhanced_image=None,
@@ -780,6 +782,32 @@ class IntersectionDetector(SmartyNode):
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.35,
                     BLUE,
+                    1,
+                )
+
+            if left_stop_ghost_cc is not None:
+                # Left stop ghost CC: orange circle with LEFT label
+                cv2.circle(image, left_stop_ghost_cc, 6, ORANGE, 2)
+                cv2.putText(
+                    image,
+                    "LEFT_G",
+                    (left_stop_ghost_cc[0] - 20, left_stop_ghost_cc[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    ORANGE,
+                    1,
+                )
+
+            if right_stop_ghost_cc is not None:
+                # Right stop ghost CC: pink circle with RIGHT label
+                cv2.circle(image, right_stop_ghost_cc, 6, PINK, 2)
+                cv2.putText(
+                    image,
+                    "RIGHT_G",
+                    (right_stop_ghost_cc[0] - 25, right_stop_ghost_cc[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.35,
+                    PINK,
                     1,
                 )
         except Exception:
@@ -3797,6 +3825,63 @@ class IntersectionDetector(SmartyNode):
             self.get_logger().error(f"Error calculating ghost CCs: {e}")
             return None, None
 
+    def calculate_stop_line_ghost_centers(
+        self, crossing_center, prominent_angle, offset_distance: float = 100.0
+    ):
+        """
+        Calculate ghost crossing centers for stop lines (left and right).
+
+        Projects two points from the main crossing center along the orthogonal
+        (perpendicular) direction to the prominent angle:
+        - left_ghost_cc: offset to the left (perpendicular)
+        - right_ghost_cc: offset to the right (perpendicular)
+
+        This helps find left/right stop lines that are offset from center.
+
+        Arguments:
+            crossing_center -- Main crossing center (x, y)
+            prominent_angle -- Angle in degrees (0-180)
+            offset_distance -- How far to offset (default 100px)
+
+        Returns:
+            Tuple of (left_ghost_cc, right_ghost_cc) as (x, y) tuples,
+            or (None, None) if angle is not available
+        """
+        if crossing_center is None or prominent_angle is None:
+            return None, None
+
+        try:
+            # Convert angle to radians
+            angle_rad = math.radians(float(prominent_angle))
+
+            # Calculate direction vector along prominent angle
+            dx = math.cos(angle_rad)
+            dy = math.sin(angle_rad)
+
+            # Orthogonal direction (perpendicular, rotated 90 degrees)
+            # To get perpendicular: if direction is (dx, dy),
+            # perpendicular is (-dy, dx)
+            orth_dx = -dy
+            orth_dy = dx
+
+            cx, cy = crossing_center
+
+            # LEFT ghost: offset distance to the left (orthogonal)
+            left_ghost_x = cx + orth_dx * offset_distance
+            left_ghost_y = cy + orth_dy * offset_distance
+            left_ghost_cc = (int(left_ghost_x), int(left_ghost_y))
+
+            # RIGHT ghost: offset distance to the right (orthogonal)
+            right_ghost_x = cx - orth_dx * offset_distance
+            right_ghost_y = cy - orth_dy * offset_distance
+            right_ghost_cc = (int(right_ghost_x), int(right_ghost_y))
+
+            return left_ghost_cc, right_ghost_cc
+
+        except Exception as e:
+            self.get_logger().error(f"Error calculating stop line ghost CCs: {e}")
+            return None, None
+
     def find_ego_line(self, horiz_lines, crossing_center, ghost_cc=None):
         """
         Find the ego line from the list of lines.
@@ -4534,6 +4619,99 @@ class IntersectionDetector(SmartyNode):
         best_line = max(vert, key=lambda line: self._line_length(line))
         return self.elongate_line(best_line, length=180)
 
+    def find_stop_line_by_ghost_cc(self, lines, ghost_cc, min_length: float = 60.0):
+        """
+        Find the closest vertical line to a ghost crossing center.
+
+        Searches through all vertical lines and returns the one that is:
+        1. Longer than min_length
+        2. Closest to the ghost_cc point
+
+        This is used to find left/right stop lines that may be offset
+        from the center of the road.
+
+        Arguments:
+            lines -- List of detected line segments
+            ghost_cc -- Ghost crossing center point (x, y) tuple
+            min_length -- Minimum line length to consider (default 60px)
+
+        Returns:
+            Best vertical line closest to ghost_cc, or None
+        """
+        if lines is None or len(lines) == 0 or ghost_cc is None:
+            return None
+
+        try:
+            # Filter lines by minimum length
+            long_lines = self.filter_by_length(lines, min_length=min_length)
+
+            if long_lines is None or len(long_lines) == 0:
+                return None
+
+            # Filter for vertical lines
+            vert, horiz = self.filter_by_angle(long_lines, tol_deg=15)
+
+            if vert is None or len(vert) == 0:
+                return None
+
+            # Find the line closest to the ghost CC
+            closest_line = None
+            min_distance = float("inf")
+
+            for line in vert:
+                x1, y1, x2, y2 = line[0]
+                # Calculate distance from ghost CC to line midpoint
+                mid_x = (x1 + x2) / 2.0
+                mid_y = (y1 + y2) / 2.0
+
+                distance = math.hypot(mid_x - ghost_cc[0], mid_y - ghost_cc[1])
+
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_line = line
+
+            return closest_line
+
+        except Exception as e:
+            self.get_logger().error(f"Error finding stop line by ghost CC: {e}")
+            return None
+
+    def find_left_stop_line_by_ghost_cc(
+        self, lines, left_ghost_cc, min_length: float = 60.0
+    ):
+        """
+        Find the left stop line using the left ghost crossing center.
+
+        Wrapper around find_stop_line_by_ghost_cc for the left side.
+
+        Arguments:
+            lines -- List of detected line segments
+            left_ghost_cc -- Left ghost crossing center (x, y) tuple
+            min_length -- Minimum line length to consider (default 60px)
+
+        Returns:
+            Left stop line closest to left_ghost_cc, or None
+        """
+        return self.find_stop_line_by_ghost_cc(lines, left_ghost_cc, min_length)
+
+    def find_right_stop_line_by_ghost_cc(
+        self, lines, right_ghost_cc, min_length: float = 60.0
+    ):
+        """
+        Find the right stop line using the right ghost crossing center.
+
+        Wrapper around find_stop_line_by_ghost_cc for the right side.
+
+        Arguments:
+            lines -- List of detected line segments
+            right_ghost_cc -- Right ghost crossing center (x, y) tuple
+            min_length -- Minimum line length to consider (default 60px)
+
+        Returns:
+            Right stop line closest to right_ghost_cc, or None
+        """
+        return self.find_stop_line_by_ghost_cc(lines, right_ghost_cc, min_length)
+
     def _line_length(self, line):
         """Calculate the Euclidean length of a line segment."""
         x1, y1, x2, y2 = line[0]
@@ -4906,11 +5084,27 @@ class IntersectionDetector(SmartyNode):
         fused_lines = lines
         # save short lines for stop line detection in quadrants
 
+        if crossing_center is not None:
+            (
+                left_stop_ghost_cc,
+                right_stop_ghost_cc,
+            ) = self.calculate_stop_line_ghost_centers(
+                crossing_center, closest_line_angle
+            )
+
         # Detect stop lines using ROI quadrants (Q1 for left, Q2 for right)
-        stop_line_left = self.find_line_in_quadrant(lines, q1, min_length=60)
-        stop_line_right = self.find_line_in_quadrant(
-            lines, q2, min_length=60, require_full=False
-        )
+        if left_stop_ghost_cc is None and right_stop_ghost_cc is None:
+            stop_line_left = self.find_line_in_quadrant(lines, q1, min_length=60)
+            stop_line_right = self.find_line_in_quadrant(
+                lines, q2, min_length=60, require_full=False
+            )
+        else:
+            stop_line_left = self.find_left_stop_line_by_ghost_cc(
+                lines, left_stop_ghost_cc, min_length=60
+            )
+            stop_line_right = self.find_right_stop_line_by_ghost_cc(
+                lines, right_stop_ghost_cc, min_length=60
+            )
 
         label_stop_line_left = None
         if stop_line_left is not None:
@@ -5161,6 +5355,7 @@ class IntersectionDetector(SmartyNode):
         opp_ghost_cc = None
         ego_clip_bounds = None
         opp_clip_bounds = None
+        # left_stop_ghost_cc and right_stop_ghost_cc already calculated above
 
         # Only attempt to find ego/opp lines if we have a valid crossing center.
         if crossing_center is not None:
@@ -5502,6 +5697,8 @@ class IntersectionDetector(SmartyNode):
             closest_line_angle=closest_line_angle,
             ego_ghost_cc=ego_ghost_cc,
             opp_ghost_cc=opp_ghost_cc,
+            left_stop_ghost_cc=left_stop_ghost_cc,
+            right_stop_ghost_cc=right_stop_ghost_cc,
             opp_clip_bounds=None,
             ego_clip_bounds=None,
             enhanced_image=enhanced_image,
