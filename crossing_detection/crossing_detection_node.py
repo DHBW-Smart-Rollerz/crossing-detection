@@ -4909,7 +4909,7 @@ class IntersectionDetector(SmartyNode):
         # Detect stop lines using ROI quadrants (Q1 for left, Q2 for right)
         stop_line_left = self.find_line_in_quadrant(lines, q1, min_length=60)
         stop_line_right = self.find_line_in_quadrant(
-            lines, q2, min_length=60, require_full=True
+            lines, q2, min_length=60, require_full=False
         )
 
         label_stop_line_left = None
@@ -5109,14 +5109,14 @@ class IntersectionDetector(SmartyNode):
             stop_line_left, stop_line_right, image
         )
 
-        if left_thickness is not None and left_thickness < 20 and not stop_dotted_left:
+        if left_thickness is not None and left_thickness < 18 and not stop_dotted_left:
             print(f"LEFT stop rejected: thickness {left_thickness:.1f} is too thin")
             stop_line_left = None
             label_stop_line_left = None
 
         if (
             right_thickness is not None
-            and right_thickness < 20
+            and right_thickness < 18
             and not stop_dotted_right
         ):
             print(f"RIGHT stop rejected: thickness {right_thickness:.1f} is too thin")
