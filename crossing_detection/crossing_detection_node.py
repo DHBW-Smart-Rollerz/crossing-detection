@@ -5481,7 +5481,7 @@ class IntersectionDetector(SmartyNode):
         # NOW: Render all debug overlays at the end, after detection is complete
         debug_image = self._render_debug_overlays(
             orig_image,
-            transformed_lines=transformed_lines,
+            transformed_lines=None,
             filtered_lines=None,
             vert=vert,
             horiz=None,
