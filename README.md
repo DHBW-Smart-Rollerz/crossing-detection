@@ -42,6 +42,12 @@ ros2 bag play /home/smartrollerz/Downloads/crossing-bag-new/ROS_Bags_2026-03-12-
 Run the crossing node:
 ```bash
 ros2 run crossing_detection crossing_detection_node
+
+# to run with debug config
+ros2 launch crossing_detection crossing_detection.launch.py config_file:=$(ros2 pkg prefix crossing_detection)/share/crossing_detection/config/debug.crossing_detection.yaml
+# for competition config
+ros2 launch crossing_detection crossing_detection.launch.py
+
 ```
 
 Die crossing detection braucht "scikit-learn". Also `pip install scikit-learn`.

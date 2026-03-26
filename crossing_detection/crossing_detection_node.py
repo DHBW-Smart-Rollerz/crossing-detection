@@ -74,7 +74,7 @@ class IntersectionDetector(SmartyNode):
                 "debug_image_publisher": "/crossing_detection/debug/image",
                 "result_publisher": "/crossing_detection/result",
                 # Parameters
-                "state": NodeState.ACTIVE.value,
+                "state": NodeState.INACTIVE.value,
                 "image_path": "resources/img/example.png",
                 "debug": False,
                 "compute_crossing_center": False,
