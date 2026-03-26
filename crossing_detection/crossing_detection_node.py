@@ -15,7 +15,8 @@ from smarty_utils.enums import NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
 
-from crossing_detection.crossing_detection.agreggator import IntersectionAggregator
+from crossing_detection.agreggator import IntersectionAggregator
+from crossing_detection.debug_visualizer import CrossingDebugVisualizer
 
 # Color constants (RGB tuples - will be converted to BGR via cv2.COLOR_RGB2BGR)
 RED = (255, 0, 0)
@@ -146,7 +147,7 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             self.debug_line_gap_detection = False
 
-        self.debug_overlay_images = []
+        self.debug_visualizer = CrossingDebugVisualizer(node=self)
 
         self.detected_crossing_center = None
         self.active_crossing_center = None
@@ -2114,7 +2115,7 @@ class IntersectionDetector(SmartyNode):
             )
             if not hasattr(self, "debug_overlay_images"):
                 self.debug_overlay_images = []
-            self.debug_overlay_images.append(debug_image)
+            self.debug_visualizer.debug_overlay_images.append(debug_image)
 
         crop_w = int(max(10, line_len * float(length_extend))) + int(box_half_width * 2)
         crop_h = int(max(3, box_half_width * 2))
@@ -2268,7 +2269,7 @@ class IntersectionDetector(SmartyNode):
 
                 if not hasattr(self, "debug_overlay_images"):
                     self.debug_overlay_images = []
-                self.debug_overlay_images.append(vis_stack)
+                self.debug_visualizer.debug_overlay_images.append(vis_stack)
 
             return bool(is_dotted), int(gaps), float(white_ratio), 1
         except Exception as e:
@@ -4697,165 +4698,6 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             result_list = []
 
-        debug_image = self._render_debug_overlays(
-            orig_image,
-            transformed_lines=None,
-            filtered_lines=None,
-            vert=vert,
-            horiz=None,
-            joined_lines=fused_lines,
-            crossing_center=crossing_center,
-            detected_corners=detected_corners,
-            cone_left=None,
-            cone_right=None,
-            cl_vert=None,
-            cl_vert_left=None,
-            ego_line_long=ego_line_long,
-            opp_line_long=opp_line_long,
-            stop_line_left=None,
-            stop_line_right=None,
-            pair_plausible=pair_plausible,
-            label=label_ego,
-            label2=label_opp,
-            closest_line_angle=closest_line_angle,
-            ego_ghost_cc=ego_ghost_cc,
-            opp_ghost_cc=opp_ghost_cc,
-            left_stop_ghost_cc=left_stop_ghost_cc,
-            right_stop_ghost_cc=right_stop_ghost_cc,
-            opp_clip_bounds=None,
-            ego_clip_bounds=None,
-            enhanced_image=enhanced_image,
-        )
-
-        debug_image = self._draw_quadrants(
-            debug_image, q1, q2, q3, q4, color=(100, 100, 100), thickness=1
-        )
-
-        if stop_line_left is not None:
-            x1, y1, x2, y2 = [int(v) for v in stop_line_left[0]]
-            cv2.line(debug_image, (x1, y1), (x2, y2), VIOLET, 2)
-
-        if stop_line_right is not None:
-            x1, y1, x2, y2 = [int(v) for v in stop_line_right[0]]
-            cv2.line(debug_image, (x1, y1), (x2, y2), VIOLET, 2)
-
-        if "stop_line_left_ext" in locals() and stop_line_left_ext is not None:
-            x1, y1, x2, y2 = [int(v) for v in stop_line_left_ext[0]]
-            cv2.line(debug_image, (x1, y1), (x2, y2), CYAN, 1)
-
-        if "stop_line_right_ext" in locals() and stop_line_right_ext is not None:
-            x1, y1, x2, y2 = [int(v) for v in stop_line_right_ext[0]]
-            cv2.line(debug_image, (x1, y1), (x2, y2), CYAN, 1)
-
-        if stop_line_left is not None and stop_line_right is not None:
-            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-
-            y_left = (y1_l + y2_l) / 2.0
-            y_right = (y1_r + y2_r) / 2.0
-            x_left = (x1_l + x2_l) / 2.0
-            x_right = (x1_r + x2_r) / 2.0
-
-            y_diff = abs(y_left - y_right)
-            x_sep = abs(x_right - x_left)
-
-            y_mid = int((y_left + y_right) / 2.0)
-            x_left_int = int(x_left)
-            x_right_int = int(x_right)
-            cv2.line(
-                debug_image,
-                (x_left_int, y_mid),
-                (x_right_int, y_mid),
-                CYAN,
-                1,
-            )
-
-            diff_line_height = 20
-            cv2.line(
-                debug_image,
-                (x_left_int, int(y_left) - diff_line_height),
-                (x_left_int, int(y_left) + diff_line_height),
-                YELLOW,
-                1,
-            )
-            cv2.line(
-                debug_image,
-                (x_right_int, int(y_right) - diff_line_height),
-                (x_right_int, int(y_right) + diff_line_height),
-                YELLOW,
-                1,
-            )
-
-            metrics_y = 100
-            metrics_text_color = GREEN
-            cv2.putText(
-                debug_image,
-                f"y_diff={y_diff:.1f}px",
-                (debug_image.shape[1] - 200, metrics_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                metrics_text_color,
-            )
-            cv2.putText(
-                debug_image,
-                f"x_sep={x_sep:.1f}px",
-                (debug_image.shape[1] - 200, metrics_y + 25),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                metrics_text_color,
-            )
-
-        y_offset = 20
-        if label_stop_line_left is not None:
-            cv2.putText(
-                debug_image,
-                label_stop_line_left,
-                (0, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                GREEN,
-            )
-            y_offset += 25
-
-        if label_stop_line_right is not None:
-            cv2.putText(
-                debug_image,
-                label_stop_line_right,
-                (0, y_offset),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                GREEN,
-            )
-
-        if True and len(self.debug_overlay_images) > 0:
-            cv2.putText(
-                debug_image,
-                "Line Detection Debug Overlays (warped images):",
-                (10, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2,
-            )
-            overlay_height = debug_image.shape[0] // 3
-            overlay_width = debug_image.shape[1] // len(self.debug_overlay_images[:3])
-            y_start = int(debug_image.shape[0] * 0.6)
-            for i, overlay_img in enumerate(self.debug_overlay_images[:3]):
-                resized = cv2.resize(
-                    overlay_img,
-                    (overlay_width, overlay_height),
-                    interpolation=cv2.INTER_LINEAR,
-                )
-                x_start = i * overlay_width
-                try:
-                    debug_image[
-                        y_start : y_start + overlay_height,
-                        x_start : x_start + overlay_width,
-                    ] = resized
-                except Exception:
-                    pass
-            self.debug_overlay_images.clear()
-
         if "ego_line_long" in locals():
             ego_for_agg = ego_line_long if ego_line_long is not None else None
         else:
@@ -4898,35 +4740,43 @@ class IntersectionDetector(SmartyNode):
             f"Stability: {stability_scores['overall']:.2f}"
         )
 
-        self._draw_crossing_type_visualization(
-            debug_image, crossing_type, is_stable, buffer_levels, overall_confidence
+        debug_image = self.debug_visualizer.render_debug_overlays(
+            image=orig_image,
+            vert=vert,
+            horiz=horiz,
+            joined_lines=fused_lines,
+            ego_line_long=ego_line_long,
+            opp_line_long=opp_line_long,
+            pair_plausible=pair_plausible,
+            crossing_center=crossing_center,
+            detected_corners=detected_corners,
+            ego_ghost_cc=ego_ghost_cc,
+            opp_ghost_cc=opp_ghost_cc,
+            left_stop_ghost_cc=left_stop_ghost_cc,
+            right_stop_ghost_cc=right_stop_ghost_cc,
+            stop_line_left=stop_line_left,
+            stop_line_right=stop_line_right,
+            stop_line_left_ext=(
+                stop_line_left_ext if "stop_line_left_ext" in locals() else None
+            ),
+            stop_line_right_ext=(
+                stop_line_right_ext if "stop_line_right_ext" in locals() else None
+            ),
+            label_stop_line_left=label_stop_line_left,
+            label_stop_line_right=label_stop_line_right,
+            label=label_ego,
+            label2=label_opp,
+            closest_line_angle=closest_line_angle,
+            q1=q1,
+            q2=q2,
+            q3=q3,
+            q4=q4,
+            crossing_type=crossing_type,
+            is_stable=is_stable,
+            buffer_levels=buffer_levels,
+            overall_confidence=overall_confidence,
+            enhanced_image=enhanced_image,
         )
-
-        if "enhanced_image" in locals() and enhanced_image is not None:
-            target_width = 250
-            aspect_ratio = enhanced_image.shape[0] / enhanced_image.shape[1]
-            target_height = int(target_width * aspect_ratio)
-
-            resized_enhanced = cv2.resize(
-                enhanced_image,
-                (target_width, target_height),
-                interpolation=cv2.INTER_LINEAR,
-            )
-
-            if len(resized_enhanced.shape) == 2:
-                resized_enhanced = cv2.cvtColor(resized_enhanced, cv2.COLOR_GRAY2BGR)
-
-            margin = 5
-            x_pos = debug_image.shape[1] - target_width - margin
-            y_pos = debug_image.shape[0] - target_height - margin
-
-            if x_pos >= 0 and y_pos >= 0:
-                try:
-                    debug_image[
-                        y_pos : y_pos + target_height, x_pos : x_pos + target_width
-                    ] = resized_enhanced
-                except Exception:
-                    pass
 
         return debug_image, result_list
 
