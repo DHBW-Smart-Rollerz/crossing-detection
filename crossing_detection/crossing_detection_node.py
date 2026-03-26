@@ -88,6 +88,7 @@ class IntersectionDetector(SmartyNode):
                 "enhance_distortion_dilations": 1,
                 # Gap detection debug visualization
                 "debug_line_gap_detection": False,
+                "debug_logging": False,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -144,6 +145,18 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             self.debug_line_gap_detection = False
 
+        try:
+            self.debug_logging = self.get_parameter("debug_logging").value
+        except Exception:
+            self.debug_logging = False
+
+        # Configure logger level based on debug_logging parameter
+        logger = self.get_logger()
+        if self.debug_logging:
+            logger.set_level(rclpy.logging.LoggingSeverity.DEBUG)
+        else:
+            logger.set_level(rclpy.logging.LoggingSeverity.INFO)
+
         self.debug_visualizer = CrossingDebugVisualizer(node=self)
 
         self.detected_crossing_center = None
@@ -153,6 +166,7 @@ class IntersectionDetector(SmartyNode):
 
         self.intersection_aggregator = IntersectionAggregator(max_frames=7)
 
+    @timer.Timer(name="image_callback", filter_strength=40)
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
         try:
@@ -179,33 +193,6 @@ class IntersectionDetector(SmartyNode):
 
         except Exception as e:
             self.get_logger().error(f"image_callback error: {e}")
-
-    @timer.Timer(name="total", filter_strength=40)
-    def execute_prediction(self, msg: sensor_msgs.msg.Image):
-        """
-        Execute the prediction.
-
-        Arguments:
-            msg -- The image message.
-        """
-        with timer.Timer(name="msg_transport", filter_strength=40):
-            image = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="8UC1")
-
-        with timer.Timer(name="publish", filter_strength=40):
-            try:
-                msg = std_msgs.msg.Float32MultiArray(data=[0.0])
-                self.result_publisher.publish(msg)
-            except Exception:
-                pass
-
-        if self._debug:
-            with timer.Timer(name="debug", filter_strength=40):
-                debug_image = image.copy()
-                debug_image.fill(self.example_value)
-
-                self.debug_image_publisher.publish(  # type: ignore
-                    self.cv_bridge.cv2_to_imgmsg(image, encoding="8UC1")
-                )
 
     def perform_canny(self, img):
         """
@@ -1087,13 +1074,13 @@ class IntersectionDetector(SmartyNode):
                 min_gap_count=3,
             )
 
-            print(
+            self.get_logger().debug(
                 f"EXTENSION TEST ({direction}): gaps={gaps_count} "
                 f"wr={wr_extended:.1f}%"
             )
 
             if gaps_count == 0 and wr_extended > 20.0:
-                print(
+                self.get_logger().debug(
                     f"REJECTING: extended line ({direction}) is "
                     f"continuous (wr={wr_extended:.1f}% > 20%)"
                 )
@@ -1179,7 +1166,7 @@ class IntersectionDetector(SmartyNode):
                 dtype=np.float32,
             )
 
-            print(
+            self.get_logger().debug(
                 f"[DEBUG] Stop line {'RIGHT' if is_right else 'LEFT'}: "
                 f"start=({x_start:.1f}, {y_start:.1f}), "
                 f"padded=({x_padded:.1f}, {y_padded:.1f}), "
@@ -1200,7 +1187,7 @@ class IntersectionDetector(SmartyNode):
             )
 
             stop_type = "RIGHT" if is_right else "LEFT"
-            print(
+            self.get_logger().debug(
                 f"STOP LINE {stop_type} EXTENSION: gaps={gaps_count} "
                 f"wr={wr_extended:.1f}%"
             )
@@ -1820,7 +1807,7 @@ class IntersectionDetector(SmartyNode):
             Tuple of (prominent_angle_deg, line_count) or (None, 0) if invalid
         """
         if lines is None or len(lines) == 0:
-            print("No lines provided to histogram")
+            self.get_logger().debug("No lines provided to histogram")
             return None, 0
 
         valid_angles = []
@@ -1855,9 +1842,11 @@ class IntersectionDetector(SmartyNode):
             except Exception:
                 continue
 
-        print(f"Total lines: {len(lines)}")
-        print(f"Lines filtered by angle (>45 deg): {lines_filtered_by_angle}")
-        print(f"Valid angles for histogram: {len(valid_angles)}")
+        self.get_logger().debug(f"Total lines: {len(lines)}")
+        self.get_logger().debug(
+            f"Lines filtered by angle (>45 deg): {lines_filtered_by_angle}"
+        )
+        self.get_logger().debug(f"Valid angles for histogram: {len(valid_angles)}")
 
         if len(valid_angles) == 0:
             return None, 0
@@ -1870,7 +1859,7 @@ class IntersectionDetector(SmartyNode):
 
         count_str = len(valid_angles)
         msg = f"Prominent angle: {prominent_angle:.2f} deg ({count_str} lines)"
-        print(msg)
+        self.get_logger().debug(msg)
 
         return prominent_angle, len(valid_angles)
 
@@ -2309,7 +2298,7 @@ class IntersectionDetector(SmartyNode):
         if nearest_line is not None:
             x1, y1, x2, y2 = nearest_line[0]
             if math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) < 80:
-                print("Nearest line too short, rejecting")
+                self.get_logger().debug("Nearest line too short, rejecting")
                 return None
         return nearest_line
 
@@ -2456,7 +2445,7 @@ class IntersectionDetector(SmartyNode):
             ]
 
             num_lines = len(horiz_lines_in_region)
-            print(
+            self.get_logger().debug(
                 f"{line_name} stop {endpoint_name} endpoint check "
                 f"(y={ep_y:.1f}): found {num_lines} horizontal lines "
                 f"in 60x60 region"
@@ -2518,7 +2507,7 @@ class IntersectionDetector(SmartyNode):
                 )
 
                 right_valid = black_pct > 55
-                print(
+                self.get_logger().debug(
                     f"RIGHT stop lowest point "
                     f"(x={bottom_x_r:.1f}, y={bottom_y_r:.1f}): "
                     f"{black_pct:.1f}%"
@@ -2550,7 +2539,7 @@ class IntersectionDetector(SmartyNode):
                 )
 
                 left_valid = black_pct > 55
-                print(
+                self.get_logger().debug(
                     f"LEFT stop highest point "
                     f"(x={top_x_l:.1f}, y={top_y_l:.1f}): "
                     f"{black_pct:.1f}%"
@@ -2628,13 +2617,13 @@ class IntersectionDetector(SmartyNode):
                         avg_pix = (
                             sum(pixel_values) / len(pixel_values) if pixel_values else 0
                         )
-                        print(
+                        self.get_logger().debug(
                             f"RIGHT thickness: {right_thickness} px, "
                             f"avg={avg_pix:.0f} "
                             f"(mid x={mid_x_r:.1f}, y={mid_y_r:.1f})"
                         )
                 except Exception as e:
-                    print(f"Error measuring RIGHT thickness: {e}")
+                    self.get_logger().error(f"Error measuring RIGHT thickness: {e}")
 
             if stop_line_left is not None:
                 try:
@@ -2682,18 +2671,18 @@ class IntersectionDetector(SmartyNode):
                         avg_pix = (
                             sum(pixel_values) / len(pixel_values) if pixel_values else 0
                         )
-                        print(
+                        self.get_logger().debug(
                             f"LEFT thickness: {left_thickness} px, "
                             f"avg={avg_pix:.0f} "
                             f"(mid x={mid_x_l:.1f}, y={mid_y_l:.1f})"
                         )
                 except Exception as e:
-                    print(f"Error measuring LEFT thickness: {e}")
+                    self.get_logger().error(f"Error measuring LEFT thickness: {e}")
 
             return left_thickness, right_thickness
 
         except Exception as e:
-            print(f"Error in measure_stop_line_thickness: {e}")
+            self.get_logger().error(f"Error in measure_stop_line_thickness: {e}")
             return None, None
 
     def calculate_cat_eye(self, image):
@@ -3385,7 +3374,9 @@ class IntersectionDetector(SmartyNode):
             ) = self.check_line_by_vertical_extension(
                 stop_line_left, image, is_right=False
             )
-            print(f"Left stop line: gaps_ext={gaps_ext}, wr_ext={wr_ext:.1f}%")
+            self.get_logger().debug(
+                f"Left stop line: gaps_ext={gaps_ext}, wr_ext={wr_ext:.1f}%"
+            )
 
             line_left_ext_passed = gaps_ext > 0 and wr_ext <= 10
 
@@ -3421,7 +3412,9 @@ class IntersectionDetector(SmartyNode):
             ) = self.check_line_by_vertical_extension(
                 stop_line_right, image, is_right=True
             )
-            print(f"Right stop line: gaps_ext={gaps_ext}, " f"wr_ext={wr_ext:.1f}%")
+            self.get_logger().debug(
+                f"Right stop line: gaps_ext={gaps_ext}, wr_ext={wr_ext:.1f}%"
+            )
 
             line_right_ext_passed = gaps_ext > 0 and wr_ext < 10
 
@@ -3465,7 +3458,7 @@ class IntersectionDetector(SmartyNode):
                 stop_line_right = None
                 label_stop_line_right = None
             elif stop_x_r < min_x_right_stop:
-                print(
+                self.get_logger().debug(
                     f"RIGHT stop rejected: x={stop_x_r:.1f} is too close to "
                     f"left edge (min={min_x_right_stop:.1f})"
                 )
@@ -3474,7 +3467,7 @@ class IntersectionDetector(SmartyNode):
             elif crossing_center is not None:
                 crossing_x = crossing_center[0]
                 if stop_x_r < crossing_x:
-                    print(
+                    self.get_logger().debug(
                         f"RIGHT stop rejected: x={stop_x_r:.1f} is left of "
                         f"crossing x={crossing_x:.1f}"
                     )
@@ -3488,14 +3481,14 @@ class IntersectionDetector(SmartyNode):
             crossing_y = crossing_center[1]
             crossing_x = crossing_center[0]
             if stop_x_l > crossing_x:
-                print(
+                self.get_logger().debug(
                     f"LEFT stop rejected: x={stop_x_l:.1f} is right of "
                     f"crossing x={crossing_x:.1f}"
                 )
                 stop_line_left = None
                 label_stop_line_left = None
             elif stop_x_l > max_x_left_stop:
-                print(
+                self.get_logger().debug(
                     f"LEFT stop rejected: x={stop_x_l:.1f} is too close to "
                     f"right edge (max={max_x_left_stop:.1f})"
                 )
@@ -3514,12 +3507,16 @@ class IntersectionDetector(SmartyNode):
         )
 
         if not cross_right_open:
-            print("RIGHT stop rejected: crossing closing area too dark")
+            self.get_logger().debug(
+                "RIGHT stop rejected: crossing closing area too dark"
+            )
             stop_line_right = None
             label_stop_line_right = None
 
         if not cross_left_open:
-            print("LEFT stop rejected: crossing closing area too dark")
+            self.get_logger().debug(
+                "LEFT stop rejected: crossing closing area too dark"
+            )
             stop_line_left = None
             label_stop_line_left = None
 
@@ -3528,7 +3525,9 @@ class IntersectionDetector(SmartyNode):
         )
 
         if left_thickness is not None and left_thickness < 18 and not stop_dotted_left:
-            print(f"LEFT stop rejected: thickness {left_thickness:.1f} is too thin")
+            self.get_logger().debug(
+                f"LEFT stop rejected: thickness {left_thickness:.1f} is too thin"
+            )
             stop_line_left = None
             label_stop_line_left = None
 
@@ -3537,7 +3536,9 @@ class IntersectionDetector(SmartyNode):
             and right_thickness < 18
             and not stop_dotted_right
         ):
-            print(f"RIGHT stop rejected: thickness {right_thickness:.1f} is too thin")
+            self.get_logger().debug(
+                f"RIGHT stop rejected: thickness {right_thickness:.1f} is too thin"
+            )
             stop_line_right = None
             label_stop_line_right = None
 
@@ -3574,6 +3575,8 @@ class IntersectionDetector(SmartyNode):
         opp_ghost_cc = None
         ego_clip_bounds = None
         opp_clip_bounds = None
+        clipped_ego = None
+        clipped_opp = None
 
         if crossing_center is not None:
             ego_ghost_cc, opp_ghost_cc = self.calculate_ghost_crossing_centers(
@@ -3583,7 +3586,9 @@ class IntersectionDetector(SmartyNode):
             ego_line = self.find_ego_line(horiz, crossing_center, ghost_cc=ego_ghost_cc)
             opp_line = self.find_opp_line(horiz, crossing_center, ghost_cc=opp_ghost_cc)
 
-            print(f"Initial ego line: {ego_line}, opp line: {opp_line}")
+            self.get_logger().debug(
+                f"Initial ego line: {ego_line}, opp line: {opp_line}"
+            )
 
             if ego_line is not None:
                 ego_line_long = self.elongate_line(ego_line)
@@ -3618,7 +3623,7 @@ class IntersectionDetector(SmartyNode):
                 min_wr_ego_solid = 20.0 if is_angled_approach else 35.0
                 min_wr_ego = min_wr_ego_dotted if ego_dotted else min_wr_ego_solid
 
-                print(
+                self.get_logger().debug(
                     f"EGO LINE: g={ego_gap_count} wr={wr_ego:.1f}% "
                     f"(angle_dev={angle_deviation:.1f}°, "
                     f"min_wr={min_wr_ego:.0f}%)"
@@ -3723,7 +3728,7 @@ class IntersectionDetector(SmartyNode):
                 is_angled_approach = angle_deviation > 15.0
                 min_wr_opp = 28.0 if is_angled_approach else 35.0
 
-                print(
+                self.get_logger().debug(
                     f"OPP LINE: g={opp_gap_count} wr={wr_opp:.1f}% "
                     f"(angle_dev={angle_deviation:.1f}°, "
                     f"min_wr={min_wr_opp:.0f}%)"
@@ -3731,7 +3736,7 @@ class IntersectionDetector(SmartyNode):
 
                 q1q2 = [q1[0], q2[1], q2[2], q1[3]]
                 opp_location_valid = self.is_line_in_quadrant(clipped_opp, q1q2)
-                print(f"valid={opp_location_valid}")
+                self.get_logger().debug(f"valid={opp_location_valid}")
 
                 opp_line_extended = None
                 (
@@ -3763,12 +3768,14 @@ class IntersectionDetector(SmartyNode):
                     label_opp = None
                     clipped_opp = None
 
-                if clipped_opp is None:
-                    opp_line_long = None
-                else:
-                    opp_line_long = clipped_opp
+            if clipped_opp is None:
+                opp_line_long = None
+            else:
+                opp_line_long = clipped_opp
 
-            print(f"Detected ego line: {label_ego}, opp line: {label_opp}")
+            self.get_logger().debug(
+                f"Detected ego line: {label_ego}, opp line: {label_opp}"
+            )
 
             if ego_line_long is not None and opp_line_long is not None:
                 pair_plausible = self.check_plausibility_horizontal_line_pair(
@@ -3948,7 +3955,6 @@ def main(args=None):
     finally:
         node.destroy_node()
 
-        # Shutdown if not already done by the ROS2 launch system
         if rclpy.ok():
             rclpy.shutdown()
 
