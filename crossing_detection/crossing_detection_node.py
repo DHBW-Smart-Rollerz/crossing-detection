@@ -3931,7 +3931,7 @@ class IntersectionDetector(SmartyNode):
 
 def main(args=None):
     """
-    Main function to start the ROS2ExampleNode.
+    Main function to start the crossing detection node.
 
     Keyword Arguments:
         args -- Launch arguments (default: {None})
@@ -3940,15 +3940,7 @@ def main(args=None):
     node = IntersectionDetector()
 
     try:
-        use_wait_for_message = True
-        if use_wait_for_message:
-            while rclpy.ok():
-                # node.wait_for_message_and_execute()
-                # for img in os.listdir(IntersectionDetector.DBG_IMG_DIR):
-                #    node.pipeline(os.path.join(IntersectionDetector.DBG_IMG_DIR, img))
-                rclpy.spin_once(node)
-        else:
-            rclpy.spin(node)
+        rclpy.spin(node)
 
     except KeyboardInterrupt:
         pass
