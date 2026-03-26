@@ -169,6 +169,9 @@ class IntersectionDetector(SmartyNode):
     @timer.Timer(name="image_callback", filter_strength=40)
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
+        if self.get_parameter("state").value != NodeState.ACTIVE.value:
+            return
+
         try:
             try:
                 img = self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
