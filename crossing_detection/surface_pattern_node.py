@@ -8,6 +8,7 @@ import rclpy
 import sensor_msgs.msg
 import std_msgs.msg
 from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
 from smarty_utils.enums import NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
@@ -45,7 +46,7 @@ class LaneType(IntEnum):
     LEFT_DOTTED = 27
 
 
-FILTERING_ROI_REL_RLTB = (0.65, 0.4, 0, 0.815)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.70, 0.45, 0, 0.815)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -3400,6 +3401,10 @@ class SurfacePatternDetector(SmartyNode):
             filtered_lines, angle_tol_deg=5, center_dist_tol=20
         )
 
+        fused_lines = self.fuse_similar_lines(
+            filtered_lines, angle_tol_deg=5, center_dist_tol=30
+        )
+
         closest_line_angle = None
         if filtered_lines is not None and len(filtered_lines) > 0:
             closest_line_angle, line_count = self.find_prominent_angle_in_quadrants(
@@ -3419,14 +3424,17 @@ class SurfacePatternDetector(SmartyNode):
             features = []
             for line in lines:
                 x1, y1, x2, y2 = line[0]
-                mid_x = (x1 + x2) / 2.0
-                mid_y = (y1 + y2) / 2.0
+                center_x = (x1 + x2) / 2.0
+                center_y = (y1 + y2) / 2.0
                 angle = math.atan2(y2 - y1, x2 - x1)
-                features.append([mid_x, mid_y, angle])
+                angle = angle if angle >= 0 else angle + math.pi
+                features.append([center_x, center_y, angle])
+
+            features = StandardScaler().fit_transform(features)
             return np.array(features)
 
         def cluster_dbscan(features):
-            db = DBSCAN(eps=100, min_samples=6).fit(features)
+            db = DBSCAN(eps=1.75, min_samples=8).fit(features)
             return db.labels_
 
         if lines is not None and len(lines) > 0:
