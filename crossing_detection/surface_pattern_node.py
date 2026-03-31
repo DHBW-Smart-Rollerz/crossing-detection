@@ -45,15 +45,15 @@ class LaneType(IntEnum):
     LEFT_DOTTED = 27
 
 
-FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.815)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.65, 0.4, 0, 0.815)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
 
 
-class IntersectionDetector(SmartyNode):
+class SurfacePatternDetector(SmartyNode):
     """
-    A ROS2 node for crossing detection.
+    A ROS2 node for surface pattern detection.
 
     Arguments:
         SmartyNode -- Base class for ROS2 nodes.
@@ -516,6 +516,81 @@ class IntersectionDetector(SmartyNode):
                     horizontal.append(line)
 
         return vertical, horizontal
+
+    def filter_by_diagonal_angle(
+        self,
+        lines,
+        prominent_angle,
+        tol_deg: float = 20.0,
+    ):
+        """
+        Filter lines based on diagonal angles relative to the prominent angle.
+
+        Uses the prominent angle to define diagonal directions:
+        - diagonal_1 = prominent_angle + 63°
+        - diagonal_2 = prominent_angle + 117° (perpendicular diagonal)
+
+        Arguments:
+            lines -- List of lines as pairs of points.
+            prominent_angle -- The prominent angle from line analysis
+            tol_deg -- Tolerance for diagonal angle classification (degrees)
+
+        Returns:
+            List of lines with diagonal orientation (within tolerance)
+        """
+        diagonal_lines = []
+
+        if lines is None or len(lines) == 0:
+            return diagonal_lines
+
+        if prominent_angle is None:
+            return diagonal_lines
+
+        # Calculate diagonal angles based on prominent angle
+        diagonal_1 = (prominent_angle + 63.0) % 180.0
+        diagonal_2 = (prominent_angle + 117.0) % 180.0
+
+        for line in lines:
+            arr = line[0]
+            if arr.size < 4:
+                continue
+
+            x1, y1, x2, y2 = (
+                float(arr[0]),
+                float(arr[1]),
+                float(arr[2]),
+                float(arr[3]),
+            )
+
+            dx = x2 - x1
+            dy = y2 - y1
+
+            if dx == 0 and dy == 0:
+                continue
+
+            angle = math.degrees(math.atan2(dy, dx))
+            # Normalize angle to 0-180 range
+            angle_norm = (angle + 360.0) % 180.0
+
+            # Check distance to first diagonal
+            dist_to_diag1 = min(
+                abs(angle_norm - diagonal_1),
+                abs(angle_norm - (diagonal_1 + 180.0) % 180.0),
+            )
+
+            # Check distance to second diagonal
+            dist_to_diag2 = min(
+                abs(angle_norm - diagonal_2),
+                abs(angle_norm - (diagonal_2 + 180.0) % 180.0),
+            )
+
+            # Accept if close to either diagonal
+            min_dist = min(dist_to_diag1, dist_to_diag2)
+
+            if min_dist <= tol_deg:
+                diagonal_lines.append(line)
+
+        return diagonal_lines
 
     def filter_by_roi(self, lines, img_shape):
         """
@@ -3221,6 +3296,35 @@ class IntersectionDetector(SmartyNode):
 
         return image
 
+    def draw_cluster_hulls(self, image, lines, line_clusters):
+        """
+        Draw convex hulls around line clusters on the image.
+
+        Arguments:
+            image -- Image to draw on
+            lines -- List of lines
+            line_clusters -- Cluster labels from DBSCAN
+        """
+        if line_clusters is None:
+            return
+
+        unique_clusters = set(line_clusters)
+        for cluster_id in unique_clusters:
+            if cluster_id == -1:
+                continue  # skip noise
+            cluster_lines = [
+                line for line, lbl in zip(lines, line_clusters) if lbl == cluster_id
+            ]
+            if len(cluster_lines) > 0:
+                points = []
+                for line in cluster_lines:
+                    x1, y1, x2, y2 = line[0]
+                    points.append((x1, y1))
+                    points.append((x2, y2))
+                points = np.array(points, dtype=np.int32)
+                hull = cv2.convexHull(points)
+                cv2.polylines(image, [hull], True, (0, 255, 0), 2)
+
     def pipeline(self, image):
         """
         Complete processing pipeline for intersection detection.
@@ -3231,712 +3335,111 @@ class IntersectionDetector(SmartyNode):
         orig_image = image.copy()
 
         image = self.preprocess_image(image)
-        enhanced_image = image
 
-        q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
+        # Draw ROI box on visualization
+        xs, xe, ys, ye = self.get_roi_bbox(image.shape)
+        cv2.rectangle(
+            orig_image,
+            (int(xs), int(ys)),
+            (int(xe), int(ye)),
+            (255, 0, 100),  # Dark gray
+            2,
+        )
 
         lines = self.line_segment_detector(image)
+        ll = lines[::]
+
+        # Visualize raw LSD lines on orig_image
+        if ll is not None and len(ll) > 0:
+            for line in ll:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(
+                    orig_image,
+                    (int(x1), int(y1)),
+                    (int(x2), int(y2)),
+                    (0, 0, 255),  # Red for raw LSD lines
+                    2,
+                )
+            cv2.putText(
+                orig_image,
+                f"LSD Lines: {len(ll)}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+            )
+
         lines = self._normalize_lines(lines)
-        lines = self.filter_by_length(lines, min_length=20)
+        lines = self.filter_by_length(lines, min_length=30, max_length=110)
+
+        # Visualize after length filtering on orig_image
+        if lines is not None and len(lines) > 0:
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(
+                    orig_image,
+                    (int(x1), int(y1)),
+                    (int(x2), int(y2)),
+                    (0, 255, 122),  # Green for length-filtered
+                    1,
+                )
+            cv2.putText(
+                orig_image,
+                f"After Length Filter: {len(lines)}",
+                (10, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 0),
+                2,
+            )
+
         filtered_lines = self.filter_by_roi(lines, image.shape)
 
         fused_lines = self.fuse_similar_lines(
-            filtered_lines, angle_tol_deg=10, center_dist_tol=100
+            filtered_lines, angle_tol_deg=5, center_dist_tol=20
         )
 
         closest_line_angle = None
-        if fused_lines is not None and len(fused_lines) > 0:
+        if filtered_lines is not None and len(filtered_lines) > 0:
             closest_line_angle, line_count = self.find_prominent_angle_in_quadrants(
-                fused_lines, orig_image
+                filtered_lines, orig_image
             )
 
-        vert, horiz = self.filter_by_angle(
-            fused_lines,
-            anchor_angle=closest_line_angle,
-            anchor_tolerance=10.0,
-            tol_deg=5,
+        # filter angle for 45 and 135 deg
+        lines = (
+            self.filter_by_diagonal_angle(fused_lines, 0, tol_deg=15)
+            if closest_line_angle is not None
+            else []
         )
 
-        crossing_center = None
-        if getattr(self, "compute_crossing_center", True):
-            try:
-                vert_filtered = self.filter_by_length(vert, min_length=100)
-                horiz_filtered = self.filter_by_length(horiz, min_length=100)
+        # use dbscan on the lines
 
-                intersections = self.find_intersections(vert_filtered, horiz_filtered)
-            except Exception as e:
-                self.get_logger().error(f"find_intersections error: {e}")
-                intersections = []
-            try:
-                crossing_center = self.find_crossing_center(intersections)
-            except Exception as e:
-                self.get_logger().error(f"find_crossing_center error: {e}")
-                crossing_center = None
+        def build_dbscan_features(lines):
+            features = []
+            for line in lines:
+                x1, y1, x2, y2 = line[0]
+                mid_x = (x1 + x2) / 2.0
+                mid_y = (y1 + y2) / 2.0
+                angle = math.atan2(y2 - y1, x2 - x1)
+                features.append([mid_x, mid_y, angle])
+            return np.array(features)
+
+        def cluster_dbscan(features):
+            db = DBSCAN(eps=100, min_samples=6).fit(features)
+            return db.labels_
+
+        if lines is not None and len(lines) > 0:
+            features = build_dbscan_features(lines)
+            line_clusters = cluster_dbscan(features)
         else:
-            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
-            crossing_center = (
-                int((roi_left + roi_right) / 2),
-                int(roi_top + (roi_bottom - roi_top) * 0.4),
-            )
+            line_clusters = None
 
-        roi_bbox = self.get_roi_bbox(image.shape)
-        detected_corners = self.find_corners_shi_tomasi(image, roi_bbox=roi_bbox)
+        # draw contour around all lines in cluster
+        if line_clusters is not None:
+            self.draw_cluster_hulls(orig_image, lines, line_clusters)
 
-        crossing_center = None
-        if detected_corners and len(detected_corners) >= 3:
-            sorted_corners, interior_angles = self.compute_corner_angles(
-                detected_corners
-            )
-
-            if sorted_corners is not None and interior_angles is not None:
-                corner_error = self.compute_angle_error(interior_angles)
-
-                is_rect = self.is_valid_rectangle(interior_angles, angle_tolerance=20.0)
-
-                if corner_error < 30.0 or is_rect:
-                    center = np.mean(sorted_corners, axis=0).astype(int)
-                    self.detected_crossing_center = tuple(center)
-                    self.crossing_center_frames = 0
-                    self.crossing_center_error = corner_error
-                    self.active_crossing_center = self.detected_crossing_center
-
-        if self.active_crossing_center is not None:
-            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
-
-            cx, cy = self.active_crossing_center
-            shift_amount = 15 * (self.crossing_center_frames + 1)
-            cy_shifted = min(cy + shift_amount, roi_bottom)
-
-            crossing_center = (cx, int(cy_shifted))
-
-            self.crossing_center_frames += 1
-
-            if self.crossing_center_frames >= 4:
-                self.active_crossing_center = None
-                self.detected_crossing_center = None
-                self.crossing_center_frames = 0
-                roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(
-                    image.shape
-                )
-                crossing_center = (
-                    int((roi_left + roi_right) / 2),
-                    int(roi_top + (roi_bottom - roi_top) * 0.4),
-                )
-        else:
-            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
-            crossing_center = (
-                int((roi_left + roi_right) / 2),
-                int(roi_top + (roi_bottom - roi_top) * 0.4),
-            )
-
-        lines = vert + horiz
-        lines = self.filter_by_length(lines, min_length=70)
-        fused_lines = lines
-
-        if crossing_center is not None:
-            (
-                left_stop_ghost_cc,
-                right_stop_ghost_cc,
-            ) = self.calculate_stop_line_ghost_centers(
-                crossing_center, closest_line_angle
-            )
-
-        if left_stop_ghost_cc is None and right_stop_ghost_cc is None:
-            stop_line_left = self.find_line_in_quadrant(lines, q1, min_length=60)
-            stop_line_right = self.find_line_in_quadrant(
-                lines, q2, min_length=60, require_full=False
-            )
-        else:
-            stop_line_left = self.find_left_stop_line_by_ghost_cc(
-                lines, left_stop_ghost_cc, min_length=60
-            )
-            stop_line_right = self.find_right_stop_line_by_ghost_cc(
-                lines, right_stop_ghost_cc, min_length=60
-            )
-
-        label_stop_line_left = None
-        if stop_line_left is not None:
-            (
-                stop_dotted_left,
-                gap_count_left,
-                white_ratio_left,
-                _,
-            ) = self.is_line_dotted_by_gap_detection(
-                stop_line_left,
-                image,
-                box_half_width=10,
-                length_extend=1.2,
-                min_gap_count=3,
-            )
-            min_wr = 25 if stop_dotted_left else 30
-
-            (
-                gaps_ext,
-                wr_ext,
-                stop_line_left_ext,
-            ) = self.check_line_by_vertical_extension(
-                stop_line_left, image, is_right=False
-            )
-            self.get_logger().debug(
-                f"Left stop line: gaps_ext={gaps_ext}, wr_ext={wr_ext:.1f}%"
-            )
-
-            line_left_ext_passed = gaps_ext > 0 and wr_ext <= 10
-
-            if white_ratio_left >= min_wr and line_left_ext_passed:
-                label_stop_line_left = (
-                    f"STOP_LEFT DOTTED (g={gap_count_left} wr={white_ratio_left:.1f}%)"
-                    if stop_dotted_left
-                    else f"STOP_LEFT SOLID (g={gap_count_left} wr={white_ratio_left:.1f}%)"
-                )
-            else:
-                stop_line_left = None
-
-        label_stop_line_right = None
-        if stop_line_right is not None:
-            (
-                stop_dotted_right,
-                gap_count_right,
-                white_ratio_right,
-                _,
-            ) = self.is_line_dotted_by_gap_detection(
-                stop_line_right,
-                image,
-                box_half_width=10,
-                length_extend=1.2,
-                min_gap_count=3,
-            )
-            min_wr = 25 if stop_dotted_right else 30
-
-            (
-                gaps_ext,
-                wr_ext,
-                stop_line_right_ext,
-            ) = self.check_line_by_vertical_extension(
-                stop_line_right, image, is_right=True
-            )
-            self.get_logger().debug(
-                f"Right stop line: gaps_ext={gaps_ext}, wr_ext={wr_ext:.1f}%"
-            )
-
-            line_right_ext_passed = gaps_ext > 0 and wr_ext < 10
-
-            if white_ratio_right >= min_wr and line_right_ext_passed:
-                label_stop_line_right = (
-                    f"STOP_RIGHT DOTTED "
-                    f"(g={gap_count_right} wr={white_ratio_right:.1f}%)"
-                    if stop_dotted_right
-                    else (
-                        f"STOP_RIGHT SOLID "
-                        f"(g={gap_count_right} wr={white_ratio_right:.1f}%)"
-                    )
-                )
-            else:
-                stop_line_right = None
-
-        if stop_line_right is not None and crossing_center is not None:
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-            stop_y_r = (y1_r + y2_r) / 2.0
-            crossing_y = crossing_center[1]
-            if stop_y_r > crossing_y:
-                stop_line_right = None
-                label_stop_line_right = None
-            else:
-                min_y_r = min(y1_r, y2_r)
-                if min_y_r > crossing_y:
-                    stop_line_right = None
-                    label_stop_line_right = None
-
-        roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
-        roi_width = roi_right - roi_left
-        min_x_inset = roi_left + roi_width * 0.1
-        max_x_inset = roi_right - roi_width * 0.1
-        min_x_right_stop = roi_left + roi_width * 0.6
-        max_x_left_stop = roi_left + roi_width * 0.4
-
-        if stop_line_right is not None:
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-            stop_x_r = (x1_r + x2_r) / 2.0
-            if stop_x_r < min_x_inset or stop_x_r > max_x_inset:
-                stop_line_right = None
-                label_stop_line_right = None
-            elif stop_x_r < min_x_right_stop:
-                self.get_logger().debug(
-                    f"RIGHT stop rejected: x={stop_x_r:.1f} is too close to "
-                    f"left edge (min={min_x_right_stop:.1f})"
-                )
-                stop_line_right = None
-                label_stop_line_right = None
-            elif crossing_center is not None:
-                crossing_x = crossing_center[0]
-                if stop_x_r < crossing_x:
-                    self.get_logger().debug(
-                        f"RIGHT stop rejected: x={stop_x_r:.1f} is left of "
-                        f"crossing x={crossing_x:.1f}"
-                    )
-                    stop_line_right = None
-                    label_stop_line_right = None
-
-        if stop_line_left is not None and crossing_center is not None:
-            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-            stop_y_l = (y1_l + y2_l) / 2.0
-            stop_x_l = (x1_l + x2_l) / 2.0
-            crossing_y = crossing_center[1]
-            crossing_x = crossing_center[0]
-            if stop_x_l > crossing_x:
-                self.get_logger().debug(
-                    f"LEFT stop rejected: x={stop_x_l:.1f} is right of "
-                    f"crossing x={crossing_x:.1f}"
-                )
-                stop_line_left = None
-                label_stop_line_left = None
-            elif stop_x_l > max_x_left_stop:
-                self.get_logger().debug(
-                    f"LEFT stop rejected: x={stop_x_l:.1f} is too close to "
-                    f"right edge (max={max_x_left_stop:.1f})"
-                )
-                stop_line_left = None
-                label_stop_line_left = None
-            else:
-                max_y_l = max(y1_l, y2_l)
-                if max_y_l < crossing_y:
-                    stop_line_left = None
-                    label_stop_line_left = None
-                else:
-                    self._stop_left_y = stop_y_l
-
-        cross_right_open, cross_left_open = self.check_stop_line_crossing_openness(
-            stop_line_right, stop_line_left, image
-        )
-
-        if not cross_right_open:
-            self.get_logger().debug(
-                "RIGHT stop rejected: crossing closing area too dark"
-            )
-            stop_line_right = None
-            label_stop_line_right = None
-
-        if not cross_left_open:
-            self.get_logger().debug(
-                "LEFT stop rejected: crossing closing area too dark"
-            )
-            stop_line_left = None
-            label_stop_line_left = None
-
-        left_thickness, right_thickness = self.measure_stop_line_thickness(
-            stop_line_left, stop_line_right, image
-        )
-
-        if left_thickness is not None and left_thickness < 18 and not stop_dotted_left:
-            self.get_logger().debug(
-                f"LEFT stop rejected: thickness {left_thickness:.1f} is too thin"
-            )
-            stop_line_left = None
-            label_stop_line_left = None
-
-        if (
-            right_thickness is not None
-            and right_thickness < 18
-            and not stop_dotted_right
-        ):
-            self.get_logger().debug(
-                f"RIGHT stop rejected: thickness {right_thickness:.1f} is too thin"
-            )
-            stop_line_right = None
-            label_stop_line_right = None
-
-        stop_line_left, stop_line_right = self.check_stop_line_pair_plausibility(
-            stop_line_left,
-            stop_line_right,
-            max_y_diff=300.0,
-            min_y_diff=100,
-            max_x_separation=380.0,
-            min_x_separation=280.0,
-        )
-        if stop_line_left is None:
-            label_stop_line_left = None
-            self._stop_left_y = None
-        if stop_line_right is None:
-            label_stop_line_right = None
-
-        lines = self.filter_by_length(lines, min_length=100)
-
-        vert, horiz = self.filter_by_angle(
-            fused_lines,
-            anchor_angle=closest_line_angle,
-            anchor_tolerance=10.0,
-            tol_deg=5,
-        )
-
-        ego_line_long = None
-        opp_line_long = None
-        opp_line_extended = None
-        pair_plausible = False
-        label_ego = None
-        label_opp = None
-        ego_ghost_cc = None
-        opp_ghost_cc = None
-        ego_clip_bounds = None
-        opp_clip_bounds = None
-        clipped_ego = None
-        clipped_opp = None
-
-        if crossing_center is not None:
-            ego_ghost_cc, opp_ghost_cc = self.calculate_ghost_crossing_centers(
-                crossing_center, closest_line_angle
-            )
-
-            ego_line = self.find_ego_line(horiz, crossing_center, ghost_cc=ego_ghost_cc)
-            opp_line = self.find_opp_line(horiz, crossing_center, ghost_cc=opp_ghost_cc)
-
-            self.get_logger().debug(
-                f"Initial ego line: {ego_line}, opp line: {opp_line}"
-            )
-
-            if ego_line is not None:
-                ego_line_long = self.elongate_line(ego_line)
-                clipped_ego, ego_clip_bounds = self.clip_ego_line_adaptive(
-                    ego_line_long,
-                    image,
-                    angle=closest_line_angle,
-                    min_rel_base=0.5,
-                    max_rel_base=0.75,
-                )
-
-                (
-                    ego_dotted,
-                    ego_gap_count,
-                    wr_ego,
-                    _,
-                ) = self.is_line_dotted_by_gap_detection(
-                    clipped_ego,
-                    image,
-                    box_half_width=22,
-                    length_extend=1.1,
-                    min_gap_count=3,
-                )
-
-                angle_deviation = (
-                    abs(90 - closest_line_angle)
-                    if closest_line_angle is not None
-                    else 0.0
-                )
-                is_angled_approach = angle_deviation > 15.0
-                min_wr_ego_dotted = 20.0
-                min_wr_ego_solid = 20.0 if is_angled_approach else 35.0
-                min_wr_ego = min_wr_ego_dotted if ego_dotted else min_wr_ego_solid
-
-                self.get_logger().debug(
-                    f"EGO LINE: g={ego_gap_count} wr={wr_ego:.1f}% "
-                    f"(angle_dev={angle_deviation:.1f}°, "
-                    f"min_wr={min_wr_ego:.0f}%)"
-                )
-
-                (
-                    ego_left_check_fail,
-                    ego_line_ext_left,
-                ) = (
-                    self.check_line_by_horizontal_extension(
-                        clipped_ego, image, direction="left"
-                    )
-                    if clipped_ego is not None
-                    else (False, None)
-                )
-
-                ego_extension_check_passed = (
-                    not ego_left_check_fail if clipped_ego is not None else False
-                )
-
-                ego_roi_and_distance_check = False
-                if clipped_ego is not None and crossing_center is not None:
-                    roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(
-                        image.shape
-                    )
-
-                    x1, y1, x2, y2 = (
-                        float(clipped_ego[0][0]),
-                        float(clipped_ego[0][1]),
-                        float(clipped_ego[0][2]),
-                        float(clipped_ego[0][3]),
-                    )
-
-                    in_roi_x = (
-                        roi_left <= x1 <= roi_right and roi_left <= x2 <= roi_right
-                    )
-                    y_tolerance = 10
-                    y_min_tol = roi_top - y_tolerance
-                    y_max_tol = roi_bottom + y_tolerance
-                    in_roi_y = (y_min_tol <= y1 <= y_max_tol) and (
-                        y_min_tol <= y2 <= y_max_tol
-                    )
-
-                    line_center_x = (x1 + x2) / 2.0
-                    line_center_y = (y1 + y2) / 2.0
-                    dist_to_center = math.sqrt(
-                        (line_center_x - crossing_center[0]) ** 2
-                        + (line_center_y - crossing_center[1]) ** 2
-                    )
-                    within_distance = dist_to_center <= 250
-
-                    ego_roi_and_distance_check = (
-                        in_roi_x and in_roi_y and within_distance
-                    )
-
-                if (
-                    wr_ego >= min_wr_ego
-                    and ego_extension_check_passed
-                    and (ego_roi_and_distance_check)
-                    and ego_gap_count <= 4
-                ):
-                    label_ego = (
-                        f"EGO DOTTED (g={ego_gap_count} wr={wr_ego:.1f}%)"
-                        if ego_dotted
-                        else f"EGO SOLID (g={ego_gap_count} wr={wr_ego:.1f}%)"
-                    )
-                else:
-                    label_ego = None
-                    clipped_ego = None
-
-                if clipped_ego is None:
-                    ego_line_long = None
-                else:
-                    ego_line_long = clipped_ego
-
-            if opp_line is not None:
-                opp_line_long = self.elongate_line(opp_line)
-                clipped_opp, opp_clip_bounds = self.clip_opp_line_adaptive(
-                    opp_line_long, image, angle=closest_line_angle
-                )
-
-                (
-                    opp_dotted,
-                    opp_gap_count,
-                    wr_opp,
-                    _,
-                ) = self.is_line_dotted_by_gap_detection(
-                    clipped_opp,
-                    image,
-                    box_half_width=22,
-                    length_extend=1.1,
-                    min_gap_count=3,
-                )
-
-                angle_deviation = 0.0
-                if closest_line_angle is not None:
-                    normalized_angle = closest_line_angle
-                    if normalized_angle > 90:
-                        normalized_angle = 180 - normalized_angle
-                    angle_deviation = abs(normalized_angle)
-
-                is_angled_approach = angle_deviation > 15.0
-                min_wr_opp = 28.0 if is_angled_approach else 35.0
-
-                self.get_logger().debug(
-                    f"OPP LINE: g={opp_gap_count} wr={wr_opp:.1f}% "
-                    f"(angle_dev={angle_deviation:.1f}°, "
-                    f"min_wr={min_wr_opp:.0f}%)"
-                )
-
-                q1q2 = [q1[0], q2[1], q2[2], q1[3]]
-                opp_location_valid = self.is_line_in_quadrant(clipped_opp, q1q2)
-                self.get_logger().debug(f"valid={opp_location_valid}")
-
-                opp_line_extended = None
-                (
-                    opp_check_fail,
-                    opp_line_ext_right,
-                ) = (
-                    self.check_line_by_horizontal_extension(
-                        clipped_opp, image, direction="right"
-                    )
-                    if clipped_opp is not None
-                    else (False, None)
-                )
-
-                opp_extension_check_passed = (
-                    not opp_check_fail if clipped_opp is not None else False
-                )
-
-                if (
-                    wr_opp >= min_wr_opp
-                    and opp_extension_check_passed
-                    and opp_location_valid
-                ):
-                    label_opp = (
-                        f"OPP DOTTED (g={opp_gap_count} wr={wr_opp:.1f}%)"
-                        if opp_dotted
-                        else f"OPP SOLID (g={opp_gap_count} wr={wr_opp:.1f}%)"
-                    )
-                else:
-                    label_opp = None
-                    clipped_opp = None
-
-            if clipped_opp is None:
-                opp_line_long = None
-            else:
-                opp_line_long = clipped_opp
-
-            self.get_logger().debug(
-                f"Detected ego line: {label_ego}, opp line: {label_opp}"
-            )
-
-            if ego_line_long is not None and opp_line_long is not None:
-                pair_plausible = self.check_plausibility_horizontal_line_pair(
-                    opp_line_long, ego_line_long, crossing_center
-                )
-
-            if stop_line_right is not None and opp_line_long is not None:
-                x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
-                opp_y = (y1_o + y2_o) / 2.0
-                x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-                stop_y_r = (y1_r + y2_r) / 2.0
-                if stop_y_r < opp_y:
-                    stop_line_right = None
-                    label_stop_line_right = None
-
-            if stop_line_left is not None and self._stop_left_y is not None:
-                if ego_line_long is not None:
-                    x1_e, y1_e, x2_e, y2_e = ego_line_long[0]
-                    ego_y = (y1_e + y2_e) / 2.0
-                    if self._stop_left_y >= ego_y:
-                        stop_line_left = None
-                        label_stop_line_left = None
-
-                if stop_line_left is not None and opp_line_long is not None:
-                    x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
-                    opp_y = (y1_o + y2_o) / 2.0
-                    if self._stop_left_y <= opp_y:
-                        stop_line_left = None
-                        label_stop_line_left = None
-
-        else:
-            self.get_logger().debug(
-                "pipeline: skipping ego/opp line search, no crossing center"
-            )
-
-        result_list = []
-
-        def _push_entry(code, line, conf=1.0):
-            if line is None:
-                return
-            nl = self._normalize_line(line)
-            if nl is None:
-                return
-            x1p, y1p, x2p, y2p = nl[0].astype(float)
-            try:
-                code_int = int(code)
-            except Exception:
-                code_int = int(float(code))
-            result_list.extend(
-                [
-                    float(code_int),
-                    float(x1p),
-                    float(y1p),
-                    float(x2p),
-                    float(y2p),
-                    float(conf),
-                ]
-            )
-
-        try:
-            if "ego_line_long" in locals() and ego_line_long is not None:
-                code = (
-                    LaneType.EGO_DOTTED
-                    if ("ego_dotted" in locals() and ego_dotted)
-                    else LaneType.EGO_SOLID
-                )
-                _push_entry(code, ego_line_long, conf=1.0)
-            if "opp_line_long" in locals() and opp_line_long is not None:
-                code = (
-                    LaneType.OPP_DOTTED
-                    if ("opp_dotted" in locals() and opp_dotted)
-                    else LaneType.OPP_SOLID
-                )
-                _push_entry(code, opp_line_long, conf=1.0)
-        except Exception:
-            result_list = []
-
-        if "ego_line_long" in locals():
-            ego_for_agg = ego_line_long if ego_line_long is not None else None
-        else:
-            ego_for_agg = None
-
-        if "opp_line_long" in locals():
-            opp_for_agg = opp_line_long if opp_line_long is not None else None
-        else:
-            opp_for_agg = None
-
-        stop_left_for_agg = stop_line_left if stop_line_left is not None else None
-        stop_right_for_agg = stop_line_right if stop_line_right is not None else None
-
-        self.intersection_aggregator.add_detection(
-            ego_line=ego_for_agg,
-            opp_line=opp_for_agg,
-            stop_line_left=stop_left_for_agg,
-            stop_line_right=stop_right_for_agg,
-            ego_dotted=(ego_dotted if ego_for_agg is not None else None),
-            opp_dotted=(opp_dotted if opp_for_agg is not None else None),
-            stop_dotted_left=(
-                stop_dotted_left if stop_left_for_agg is not None else None
-            ),
-            stop_dotted_right=(
-                stop_dotted_right if stop_right_for_agg is not None else None
-            ),
-            ego_angle=closest_line_angle,
-            opp_angle=closest_line_angle,
-        )
-
-        crossing_type = self.intersection_aggregator.get_crossing_type()
-        is_stable = self.intersection_aggregator.is_crossing_stable()
-        buffer_levels = self.intersection_aggregator.get_buffer_levels()
-        overall_confidence = self.intersection_aggregator.get_overall_confidence()
-        stability_scores = self.intersection_aggregator.get_stability_score()
-
-        self.get_logger().info(
-            f"Aggregated crossing type: {crossing_type} | "
-            f"Confidence: {overall_confidence:.2f} | "
-            f"Stability: {stability_scores['overall']:.2f}"
-        )
-
-        debug_image = self.debug_visualizer.render_debug_overlays(
-            image=orig_image,
-            vert=vert,
-            horiz=horiz,
-            joined_lines=fused_lines,
-            ego_line_long=ego_line_long,
-            opp_line_long=opp_line_long,
-            pair_plausible=pair_plausible,
-            crossing_center=crossing_center,
-            detected_corners=detected_corners,
-            ego_ghost_cc=ego_ghost_cc,
-            opp_ghost_cc=opp_ghost_cc,
-            left_stop_ghost_cc=left_stop_ghost_cc,
-            right_stop_ghost_cc=right_stop_ghost_cc,
-            stop_line_left=stop_line_left,
-            stop_line_right=stop_line_right,
-            stop_line_left_ext=(
-                stop_line_left_ext if "stop_line_left_ext" in locals() else None
-            ),
-            stop_line_right_ext=(
-                stop_line_right_ext if "stop_line_right_ext" in locals() else None
-            ),
-            label_stop_line_left=label_stop_line_left,
-            label_stop_line_right=label_stop_line_right,
-            label=label_ego,
-            label2=label_opp,
-            closest_line_angle=closest_line_angle,
-            q1=q1,
-            q2=q2,
-            q3=q3,
-            q4=q4,
-            crossing_type=crossing_type,
-            is_stable=is_stable,
-            buffer_levels=buffer_levels,
-            overall_confidence=overall_confidence,
-            enhanced_image=enhanced_image,
-        )
-
-        return debug_image, result_list
+        return orig_image, []
 
 
 def main(args=None):
@@ -3947,7 +3450,7 @@ def main(args=None):
         args -- Launch arguments (default: {None})
     """
     rclpy.init(args=args)
-    node = IntersectionDetector()
+    node = SurfacePatternDetector()
 
     try:
         rclpy.spin(node)
