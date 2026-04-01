@@ -46,7 +46,7 @@ class LaneType(IntEnum):
     LEFT_DOTTED = 27
 
 
-FILTERING_ROI_REL_RLTB = (0.70, 0.45, 0, 0.815)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.70, 0.15, 0, 0.815)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -3300,6 +3300,7 @@ class SurfacePatternDetector(SmartyNode):
     def draw_cluster_hulls(self, image, lines, line_clusters):
         """
         Draw convex hulls around line clusters on the image.
+        Also fit and draw an ellipse around each hull.
 
         Arguments:
             image -- Image to draw on
@@ -3325,6 +3326,18 @@ class SurfacePatternDetector(SmartyNode):
                 points = np.array(points, dtype=np.int32)
                 hull = cv2.convexHull(points)
                 cv2.polylines(image, [hull], True, (0, 255, 0), 2)
+
+                # Fit and draw rectangle around the hull
+                if len(points) >= 4:
+                    try:
+                        rect = cv2.minAreaRect(points)
+                        box = cv2.boxPoints(rect)
+                        box = np.array(box, dtype=np.int32)
+                        cv2.polylines(
+                            image, [box], True, (255, 0, 255), 2
+                        )  # Magenta rectangle
+                    except Exception as e:
+                        self.get_logger().debug(f"Could not fit rectangle: {e}")
 
     def pipeline(self, image):
         """
@@ -3397,26 +3410,14 @@ class SurfacePatternDetector(SmartyNode):
 
         filtered_lines = self.filter_by_roi(lines, image.shape)
 
-        fused_lines = self.fuse_similar_lines(
-            filtered_lines, angle_tol_deg=5, center_dist_tol=20
-        )
-
-        fused_lines = self.fuse_similar_lines(
-            filtered_lines, angle_tol_deg=5, center_dist_tol=30
-        )
-
-        closest_line_angle = None
-        if filtered_lines is not None and len(filtered_lines) > 0:
-            closest_line_angle, line_count = self.find_prominent_angle_in_quadrants(
-                filtered_lines, orig_image
-            )
-
         # filter angle for 45 and 135 deg
         lines = (
-            self.filter_by_diagonal_angle(fused_lines, 0, tol_deg=15)
-            if closest_line_angle is not None
+            self.filter_by_diagonal_angle(filtered_lines, 0, tol_deg=8)
+            if True is not None
             else []
         )
+
+        lines = self.fuse_similar_lines(lines, angle_tol_deg=8, center_dist_tol=20)
 
         # use dbscan on the lines
 
@@ -3424,17 +3425,40 @@ class SurfacePatternDetector(SmartyNode):
             features = []
             for line in lines:
                 x1, y1, x2, y2 = line[0]
+                # Convert to Hesse normal form (rho, theta)
+                # rho: distance from origin to line
+                # theta: angle of normal to line
                 center_x = (x1 + x2) / 2.0
                 center_y = (y1 + y2) / 2.0
-                angle = math.atan2(y2 - y1, x2 - x1)
-                angle = angle if angle >= 0 else angle + math.pi
-                features.append([center_x, center_y, angle])
+                dx = x2 - x1
+                dy = y2 - y1
+
+                # Line direction angle
+                theta = math.atan2(dy, dx)
+
+                # Normalize theta to [0, 2π)
+                if theta < 0:
+                    theta += math.pi
+
+                # Distance from origin (0,0) to line
+                # Using point-to-line distance formula
+                line_length = math.sqrt(dx**2 + dy**2)
+                if line_length > 0:
+                    # Normal vector
+                    nx = -dy / line_length
+                    ny = dx / line_length
+                    # Distance from origin
+                    rho = abs(x1 * nx + y1 * ny)
+                else:
+                    rho = 0
+
+                features.append([rho, theta, center_x, center_y])
 
             features = StandardScaler().fit_transform(features)
             return np.array(features)
 
         def cluster_dbscan(features):
-            db = DBSCAN(eps=1.75, min_samples=8).fit(features)
+            db = DBSCAN(eps=1.5, min_samples=6).fit(features)
             return db.labels_
 
         if lines is not None and len(lines) > 0:
