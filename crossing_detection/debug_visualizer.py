@@ -5,6 +5,8 @@ import math
 import cv2
 import numpy as np
 
+from crossing_detection.utils.helper import normalize_line
+
 # Color constants (BGR format for OpenCV)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
@@ -719,7 +721,7 @@ class CrossingDebugVisualizer:
         if lines is None or (hasattr(lines, "__len__") and len(lines) == 0):
             return img2
         for line in lines:
-            nl = self.node._normalize_line(line)
+            nl = normalize_line(line)
             if nl is None:
                 continue
             x1, y1, x2, y2 = nl[0]

@@ -14,6 +14,13 @@ from timing import timer
 
 from crossing_detection.agreggator import IntersectionAggregator
 from crossing_detection.debug_visualizer import CrossingDebugVisualizer
+from crossing_detection.utils.filter import (
+    filter_by_angle,
+    filter_by_length,
+    filter_by_roi,
+    filter_lines_by_polygon,
+)
+from crossing_detection.utils.helper import normalize_line, normalize_lines
 
 # Color constants (RGB tuples - will be converted to BGR via cv2.COLOR_RGB2BGR)
 RED = (255, 0, 0)
@@ -473,6 +480,26 @@ class IntersectionDetector(SmartyNode):
         img = cv2.Canny(img, low, high)
         return img
 
+    def get_roi_bbox(self, img_shape):
+        """
+        Get the bounding box of the region of interest (ROI).
+
+        Arguments:
+            img_shape -- Shape of the image.
+
+        Returns:
+            Tuple of (x_start, x_end, y_start, y_end) defining the ROI.
+        """
+        height = img_shape[0]
+        width = img_shape[1]
+
+        roi_left = int(width * FILTERING_ROI_REL_RLTB[1])
+        roi_right = int(width * FILTERING_ROI_REL_RLTB[0])
+        roi_top = int(height * FILTERING_ROI_REL_RLTB[2])
+        roi_bottom = int(height * FILTERING_ROI_REL_RLTB[3])
+
+        return roi_left, roi_right, roi_top, roi_bottom
+
     def _enhance_by_line_brightness(self, image, lines, percentile=80):
         """
         Enhance image contrast based on detected line brightness.
@@ -500,7 +527,7 @@ class IntersectionDetector(SmartyNode):
         h, w = gray.shape[:2]
 
         for line in lines:
-            nl = self._normalize_line(line)
+            nl = normalize_line(line)
             if nl is None:
                 continue
 
@@ -577,140 +604,6 @@ class IntersectionDetector(SmartyNode):
         except Exception:
             pass
 
-    def filter_by_angle(
-        self,
-        lines,
-        tol_deg: float = 25.0,
-        anchor_angle=None,
-        anchor_tolerance=None,
-    ):
-        """
-        Filter lines based on their angle.
-
-        If anchor_angle is provided, filters lines into vertical and horizontal
-        categories relative to the anchor angle (tilted coordinate system).
-        Otherwise, filters into traditional vertical (90°) and horizontal (0°).
-
-        Arguments:
-            lines -- List of lines as pairs of points.
-            tol_deg -- Tolerance for vertical/horizontal classification (degrees)
-            debug -- Debug flag
-            anchor_angle -- Optional anchor angle to tilt the coordinate system
-            anchor_tolerance -- Tolerance around anchor (for vertical lines)
-
-        Returns:
-            Tuple of (vertical_lines, horizontal_lines)
-        """
-        vertical = []
-        horizontal = []
-
-        if lines is None or len(lines) == 0:
-            return vertical, horizontal
-
-        for idx, line in enumerate(lines):
-            arr = line[0]
-            if arr.size < 4:
-                continue
-            x1, y1, x2, y2 = float(arr[0]), float(arr[1]), float(arr[2]), float(arr[3])
-
-            dx = x2 - x1
-            dy = y2 - y1
-            if dx == 0 and dy == 0:
-                continue
-
-            angle = math.degrees(math.atan2(dy, dx))
-            angle_norm = (angle + 360.0) % 180.0
-
-            if anchor_angle is not None and anchor_tolerance is not None:
-                angle_diff = abs(angle_norm - anchor_angle)
-                if angle_diff > 90.0:
-                    angle_diff = 180.0 - angle_diff
-
-                perpendicular = (anchor_angle + 90.0) % 180.0
-                perp_diff = abs(angle_norm - perpendicular)
-                if perp_diff > 90.0:
-                    perp_diff = 180.0 - perp_diff
-
-                if angle_diff <= anchor_tolerance:
-                    vertical.append(line)
-                elif perp_diff <= anchor_tolerance:
-                    horizontal.append(line)
-            else:
-                dist_h = min(abs(angle_norm - 0.0), abs(angle_norm - 180.0))
-                dist_v = min(abs(angle_norm - 80.0), abs(angle_norm - 100.0))
-
-                if dist_v <= tol_deg + 10 and dist_v < dist_h:
-                    vertical.append(line)
-                elif dist_h <= tol_deg and dist_h < dist_v:
-                    horizontal.append(line)
-
-        return vertical, horizontal
-
-    def filter_by_roi(self, lines, img_shape):
-        """
-        Filter lines based on a region of interest (ROI).
-
-        Arguments:
-            lines -- List of lines as pairs of points.
-            img_shape -- Shape of the image.
-
-        Returns:
-            Filtered list of lines.
-        """
-        height = img_shape[0]
-        width = img_shape[1]
-
-        roi_top = int(height * FILTERING_ROI_REL_RLTB[2])
-        roi_bottom = int(height * FILTERING_ROI_REL_RLTB[3])
-        roi_left = int(width * FILTERING_ROI_REL_RLTB[1])
-        roi_right = int(width * FILTERING_ROI_REL_RLTB[0])
-
-        res = []
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            if (
-                roi_left <= x1 <= roi_right
-                and roi_left <= x2 <= roi_right
-                and roi_top <= y1 <= roi_bottom
-                and roi_top <= y2 <= roi_bottom
-            ):
-                res.append(line)
-
-        return res
-
-    def filter_by_length(self, lines, min_length=None, max_length=None):
-        """
-        Filter lines based on their length.
-
-        Arguments:
-            lines -- List of lines as pairs of points.
-            min_length -- Minimum length of the line to be kept.
-            max_length -- Maximum length of the line to be kept.
-
-        Returns:
-            Filtered list of lines.
-        """
-        if min_length is None:
-            try:
-                min_length = self.get_parameter("line_filter_min_length").value
-            except Exception:
-                min_length = 70.0
-
-        if max_length is None:
-            try:
-                max_length = self.get_parameter("line_filter_max_length").value
-            except Exception:
-                max_length = 10000.0
-
-        res = []
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            length = math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
-            if length >= min_length and length <= max_length:
-                res.append(line)
-
-        return res
-
     def line_segment_detector(self, img):
         """
         Detect line segments in the image using LSD.
@@ -725,48 +618,6 @@ class IntersectionDetector(SmartyNode):
 
         return lines
 
-    def _normalize_line(self, line):
-        """
-        Normalize a single line representation into a numpy array of.
-        shape (1, 4). Accepts formats: ndarray (1,4) or (4,), nested
-        lists [[x1,y1,x2,y2]] or tuples. Returns None for malformed
-        entries.
-        """
-        if line is None:
-            return None
-
-        if isinstance(line, np.ndarray):
-            arr = line.squeeze()
-            if arr.ndim == 1 and arr.size >= 4:
-                return arr.reshape(1, -1)[:, :4].astype(np.float32)
-            if arr.ndim == 2 and arr.shape[1] >= 4:
-                return arr.reshape(1, -1)[:, :4].astype(np.float32)
-            return None
-
-        if isinstance(line, (list, tuple)):
-            s = line
-            while len(s) == 1 and isinstance(s[0], (list, tuple, np.ndarray)):
-                s = s[0]
-            try:
-                flat = np.array(s).reshape(-1)
-                if flat.size >= 4:
-                    return flat[:4].astype(np.float32).reshape(1, 4)
-            except Exception:
-                return None
-
-        return None
-
-    def _normalize_lines(self, lines):
-        """Normalize an iterable of lines to a list of numpy (1,4) arrays."""
-        if lines is None or (hasattr(lines, "__len__") and len(lines) == 0):
-            return []
-        normalized = []
-        for ln in lines:
-            nl = self._normalize_line(ln)
-            if nl is not None:
-                normalized.append(nl)
-        return normalized
-
     def _is_line_in_region(self, line, region):
         """
         Check if a line (or its endpoints) overlaps with a region.
@@ -779,7 +630,7 @@ class IntersectionDetector(SmartyNode):
             True if line has any point in the region, False otherwise
         """
         try:
-            nl = self._normalize_line(line)
+            nl = normalize_line(line)
             if nl is None:
                 return False
 
@@ -831,7 +682,7 @@ class IntersectionDetector(SmartyNode):
 
         Returns a list of numpy arrays, each shape (1,4) (float32).
         """
-        normalized = self._normalize_lines(lines)
+        normalized = normalize_lines(lines)
         if not normalized:
             return []
 
@@ -1112,7 +963,7 @@ class IntersectionDetector(SmartyNode):
         if line is None or image is None:
             return False, 0, 0.0, 0
 
-        nl = self._normalize_line(line)
+        nl = normalize_line(line)
         if nl is None:
             return False, 0, 0.0, 0
 
@@ -1346,7 +1197,7 @@ class IntersectionDetector(SmartyNode):
         """
         if line is None or image is None:
             return None
-        nl = self._normalize_line(line)
+        nl = normalize_line(line)
         if nl is None:
             return None
         x1, y1, x2, y2 = nl[0].astype(float)
@@ -1560,7 +1411,7 @@ class IntersectionDetector(SmartyNode):
 
         for line in lines:
             try:
-                nl = self._normalize_line(line)
+                nl = normalize_line(line)
                 if nl is None:
                     continue
 
@@ -2459,19 +2310,17 @@ class IntersectionDetector(SmartyNode):
         if lines is None or len(lines) == 0 or quadrant is None:
             return None
 
-        quad_lines = self.filter_lines_by_polygon(
-            lines, quadrant, require_full=require_full
-        )
+        quad_lines = filter_lines_by_polygon(lines, quadrant, require_full=require_full)
 
         if quad_lines is None or len(quad_lines) == 0:
             return None
 
-        vert, horiz = self.filter_by_angle(quad_lines, tol_deg=10)
+        vert, horiz = filter_by_angle(quad_lines, tol_deg=10)
 
         if vert is None or len(vert) == 0:
             return None
 
-        vert = self.filter_by_length(vert, min_length=min_length)
+        vert = filter_by_length(vert, min_length=min_length)
 
         if vert is None or len(vert) == 0:
             return None
@@ -2502,12 +2351,12 @@ class IntersectionDetector(SmartyNode):
             return None
 
         try:
-            long_lines = self.filter_by_length(lines, min_length=min_length)
+            long_lines = filter_by_length(lines, min_length=min_length)
 
             if long_lines is None or len(long_lines) == 0:
                 return None
 
-            vert, horiz = self.filter_by_angle(long_lines, tol_deg=15)
+            vert, horiz = filter_by_angle(long_lines, tol_deg=15)
 
             if vert is None or len(vert) == 0:
                 return None
@@ -2573,47 +2422,6 @@ class IntersectionDetector(SmartyNode):
         x1, y1, x2, y2 = line[0]
         return math.hypot(x2 - x1, y2 - y1)
 
-    def filter_lines_by_polygon(self, lines, polygon, require_full=True):
-        """
-        Filter lines to those inside a polygon region.
-
-        Arguments:
-            lines -- iterable of lines (any accepted format by _normalize_line)
-            polygon -- list of points defining the polygon (e.g., cat_eye)
-            require_full -- if True (default) keep only lines where both
-                            endpoints are inside. If False, keep lines with
-                            at least one endpoint inside.
-
-        Returns:
-            List of normalized lines (each as numpy array shape (1,4)).
-        """
-        if not polygon or lines is None:
-            return []
-
-        try:
-            poly = np.array(polygon, dtype=np.int32)
-        except Exception:
-            return []
-
-        filtered = []
-        for ln in lines:
-            nl = self._normalize_line(ln)
-            if nl is None:
-                continue
-            x1, y1, x2, y2 = nl[0].astype(int)
-
-            d1 = cv2.pointPolygonTest(poly, (int(x1), int(y1)), False)
-            d2 = cv2.pointPolygonTest(poly, (int(x2), int(y2)), False)
-
-            if require_full:
-                if d1 >= 0 and d2 >= 0:
-                    filtered.append(nl)
-            else:
-                if d1 >= 0 or d2 >= 0:
-                    filtered.append(nl)
-
-        return filtered
-
     def is_line_in_quadrant(self, line, quadrant):
         """
         Check if a line is contained within a quadrant polygon.
@@ -2632,7 +2440,7 @@ class IntersectionDetector(SmartyNode):
             return False
 
         try:
-            nl = self._normalize_line(line)
+            nl = normalize_line(line)
             if nl is None:
                 return False
 
@@ -2675,10 +2483,10 @@ class IntersectionDetector(SmartyNode):
 
         edges = self.perform_canny(image)
         transformed_lines = self.line_segment_detector(edges)
-        transformed_lines = self._normalize_lines(transformed_lines)
+        transformed_lines = normalize_lines(transformed_lines)
 
-        filtered_lines = self.filter_by_length(transformed_lines, min_length=20)
-        filtered_lines = self.filter_by_roi(filtered_lines, image.shape)
+        filtered_lines = filter_by_length(transformed_lines, min_length=20)
+        filtered_lines = filter_by_roi(filtered_lines, image.shape)
 
         if filtered_lines and len(filtered_lines) > 0:
             image = self._enhance_by_line_brightness(
@@ -2717,9 +2525,9 @@ class IntersectionDetector(SmartyNode):
         q1, q2, q3, q4 = self.calculate_roi_quadrants(image)
 
         lines = self.line_segment_detector(image)
-        lines = self._normalize_lines(lines)
-        lines = self.filter_by_length(lines, min_length=20)
-        filtered_lines = self.filter_by_roi(lines, image.shape)
+        lines = normalize_lines(lines)
+        lines = filter_by_length(lines, min_length=20)
+        filtered_lines = filter_by_roi(lines, image.shape)
 
         fused_lines = self.fuse_similar_lines(
             filtered_lines, angle_tol_deg=10, center_dist_tol=100
@@ -2731,34 +2539,12 @@ class IntersectionDetector(SmartyNode):
                 fused_lines, orig_image
             )
 
-        vert, horiz = self.filter_by_angle(
+        vert, horiz = filter_by_angle(
             fused_lines,
             anchor_angle=closest_line_angle,
             anchor_tolerance=10.0,
             tol_deg=5,
         )
-
-        crossing_center = None
-        if getattr(self, "compute_crossing_center", True):
-            try:
-                vert_filtered = self.filter_by_length(vert, min_length=100)
-                horiz_filtered = self.filter_by_length(horiz, min_length=100)
-
-                intersections = self.find_intersections(vert_filtered, horiz_filtered)
-            except Exception as e:
-                self.get_logger().error(f"find_intersections error: {e}")
-                intersections = []
-            try:
-                crossing_center = self.find_crossing_center(intersections)
-            except Exception as e:
-                self.get_logger().error(f"find_crossing_center error: {e}")
-                crossing_center = None
-        else:
-            roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
-            crossing_center = (
-                int((roi_left + roi_right) / 2),
-                int(roi_top + (roi_bottom - roi_top) * 0.4),
-            )
 
         roi_bbox = self.get_roi_bbox(image.shape)
         detected_corners = self.find_corners_shi_tomasi(image, roi_bbox=roi_bbox)
@@ -2811,7 +2597,7 @@ class IntersectionDetector(SmartyNode):
             )
 
         lines = vert + horiz
-        lines = self.filter_by_length(lines, min_length=70)
+        lines = filter_by_length(lines, min_length=70)
         fused_lines = lines
 
         if crossing_center is not None:
@@ -3040,9 +2826,9 @@ class IntersectionDetector(SmartyNode):
         if stop_line_right is None:
             label_stop_line_right = None
 
-        lines = self.filter_by_length(lines, min_length=100)
+        lines = filter_by_length(lines, min_length=100)
 
-        vert, horiz = self.filter_by_angle(
+        vert, horiz = filter_by_angle(
             fused_lines,
             anchor_angle=closest_line_angle,
             anchor_tolerance=10.0,
@@ -3300,7 +3086,7 @@ class IntersectionDetector(SmartyNode):
         def _push_entry(code, line, conf=1.0):
             if line is None:
                 return
-            nl = self._normalize_line(line)
+            nl = normalize_lines(line)
             if nl is None:
                 return
             x1p, y1p, x2p, y2p = nl[0].astype(float)
