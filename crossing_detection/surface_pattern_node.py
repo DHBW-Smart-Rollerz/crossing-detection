@@ -47,7 +47,7 @@ class LaneType(IntEnum):
     LEFT_DOTTED = 27
 
 
-FILTERING_ROI_REL_RLTB = (0.80, 0.10, 0, 0.815)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.75, 0.15, 0, 0.815)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -284,6 +284,106 @@ class SurfacePatternDetector(SmartyNode):
         roi_bottom = int(height * FILTERING_ROI_REL_RLTB[3])
 
         return roi_left, roi_right, roi_top, roi_bottom
+
+    def get_rotated_roi_bbox(self, img_shape, angle_deg):
+        """
+        Get a rotated bounding box for the ROI aligned with prominent angle.
+
+        Arguments:
+            img_shape -- Shape of the image (height, width).
+            angle_deg -- Rotation angle in degrees (0-180).
+
+        Returns:
+            Tuple of (center_x, center_y, width, height, angle_rad)
+            for use with cv2.rotatedRectangle operations.
+        """
+        if angle_deg is None:
+            return None
+
+        height = img_shape[0]
+        width = img_shape[1]
+
+        # Get standard ROI bounds
+        roi_top = int(height * FILTERING_ROI_REL_RLTB[2])
+        roi_bottom = int(height * FILTERING_ROI_REL_RLTB[3])
+        roi_left = int(width * FILTERING_ROI_REL_RLTB[1])
+        roi_right = int(width * FILTERING_ROI_REL_RLTB[0])
+
+        # Calculate center of ROI
+        center_x = (roi_left + roi_right) / 2.0
+        center_y = (roi_top + roi_bottom) / 2.0
+
+        # Calculate dimensions
+        roi_width = roi_right - roi_left
+        roi_height = roi_bottom - roi_top
+
+        # Normalize angle to [0, 180) range
+        angle_normalized = float(angle_deg) % 180.0
+
+        # Return rotated rectangle parameters
+        # Note: cv2 expects angle in [-90, 0] for rotatedRect
+        # We convert to [-90, 0] range for proper rotation
+        angle_for_cv2 = angle_normalized - 90.0
+
+        return center_x, center_y, roi_width, roi_height, angle_for_cv2
+
+    def filter_by_rotated_roi(self, lines, img_shape, angle_deg):
+        """
+        Filter lines based on a rotated ROI aligned with the prominent angle.
+
+        Arguments:
+            lines -- List of lines as pairs of points.
+            img_shape -- Shape of the image (height, width).
+            angle_deg -- Rotation angle in degrees for ROI alignment.
+
+        Returns:
+            Filtered list of lines within the rotated ROI.
+        """
+        if angle_deg is None:
+            # Fall back to standard ROI filtering
+            return self.filter_by_roi(lines, img_shape)
+
+        rotated_roi = self.get_rotated_roi_bbox(img_shape, angle_deg)
+        if rotated_roi is None:
+            return lines
+
+        center_x, center_y, roi_width, roi_height, angle_cv2 = rotated_roi
+
+        # Convert angle to radians for point transformation
+        angle_rad = math.radians(float(angle_deg))
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+
+        res = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+
+            # Transform both endpoints to rotated coordinate system
+            # Translate to origin
+            p1_x = x1 - center_x
+            p1_y = y1 - center_y
+
+            p2_x = x2 - center_x
+            p2_y = y2 - center_y
+
+            # Rotate by -angle_deg (reverse rotation for coordinate system)
+            p1_rot_x = p1_x * cos_a + p1_y * sin_a
+            p1_rot_y = -p1_x * sin_a + p1_y * cos_a
+
+            p2_rot_x = p2_x * cos_a + p2_y * sin_a
+            p2_rot_y = -p2_x * sin_a + p2_y * cos_a
+
+            # Check if both endpoints are within rotated ROI
+            # ROI is centered at origin in rotated space
+            if (
+                abs(p1_rot_x) <= roi_width / 2.0
+                and abs(p1_rot_y) <= roi_height / 2.0
+                and abs(p2_rot_x) <= roi_width / 2.0
+                and abs(p2_rot_y) <= roi_height / 2.0
+            ):
+                res.append(line)
+
+        return res
 
     def _draw_angle_arrow(self, image, angle_deg, arrow_length=25):
         """
@@ -840,7 +940,7 @@ class SurfacePatternDetector(SmartyNode):
             line_clusters -- Cluster labels from DBSCAN
         """
         # Draw boxes
-        for cluster_id, box in boxes.items():
+        for box in boxes:
             cv2.polylines(image, [box], True, (255, 0, 255), 2)
 
     def filter_pca(self, lines, line_clusters, min_variance_ratio: float = 0.85):
@@ -964,7 +1064,15 @@ class SurfacePatternDetector(SmartyNode):
 
         image = self.preprocess_image(image)
 
-        # Draw ROI box on visualization
+        lines = self.line_segment_detector(image)
+
+        lines = self._normalize_lines(lines)
+        lines = self.filter_by_length(lines, min_length=30, max_length=110)
+
+        prominent_angle, _ = self.find_prominent_angle_in_quadrants(lines)
+
+        self._draw_angle_arrow(orig_image, prominent_angle)
+
         xs, xe, ys, ye = self.get_roi_bbox(image.shape)
         cv2.rectangle(
             orig_image,
@@ -974,44 +1082,13 @@ class SurfacePatternDetector(SmartyNode):
             2,
         )
 
-        lines = self.line_segment_detector(image)
-        ll = lines[::]
-
-        # Visualize raw LSD lines on orig_image
-        if ll is not None and len(ll) > 0:
-            for line in ll:
-                x1, y1, x2, y2 = line[0]
-                cv2.line(
-                    orig_image,
-                    (int(x1), int(y1)),
-                    (int(x2), int(y2)),
-                    (0, 0, 255),  # Red for raw LSD lines
-                    2,
-                )
-            cv2.putText(
-                orig_image,
-                f"LSD Lines: {len(ll)}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2,
-            )
-
-        lines = self._normalize_lines(lines)
-        lines = self.filter_by_length(lines, min_length=30, max_length=110)
-
         lines = self.filter_by_roi(lines, image.shape)
 
         lines = self.fuse_similar_lines(lines, angle_tol_deg=8, center_dist_tol=20)
 
-        prominent_angle, _ = self.find_prominent_angle_in_quadrants(lines)
-
-        self._draw_angle_arrow(orig_image, prominent_angle)
-
         # filter angle for 45 and 135 deg
         lines = (
-            self.filter_by_diagonal_angle(lines, abs(90 - prominent_angle), tol_deg=8)
+            self.filter_by_diagonal_angle(lines, abs(90 - prominent_angle), tol_deg=18)
             if prominent_angle is not None
             else []
         )
@@ -1020,12 +1097,12 @@ class SurfacePatternDetector(SmartyNode):
 
         if lines is not None and len(lines) > 0:
             features = self.build_dbscan_features(lines)
-            db = DBSCAN(eps=1.35, min_samples=3).fit(features)
+            db = DBSCAN(eps=0.9, min_samples=3).fit(features)
             line_clusters = db.labels_
 
             # Filter clusters using PCA
             valid_clusters = self.filter_pca(
-                lines, line_clusters, min_variance_ratio=0.95
+                lines, line_clusters, min_variance_ratio=0.98
             )
 
         else:
@@ -1034,6 +1111,7 @@ class SurfacePatternDetector(SmartyNode):
 
         filtered_clusters = None
         cluster_boxes = None
+        valid_boxes = []
 
         if line_clusters is not None and len(valid_clusters) > 0:
             filtered_clusters = np.full_like(line_clusters, -1, dtype=int)
@@ -1043,9 +1121,18 @@ class SurfacePatternDetector(SmartyNode):
 
         if filtered_clusters is not None:
             cluster_boxes = self.calculate_cluster_boxes(lines, filtered_clusters)
+            # get the width of the boxes
+            valid_boxes = []
+            for box in cluster_boxes.values():
+                if box is not None and len(box) == 4:
+                    edge1 = np.linalg.norm(box[0] - box[1])
+                    edge2 = np.linalg.norm(box[1] - box[2])
 
-        if cluster_boxes is not None and len(cluster_boxes) > 0:
-            self.draw_cluster_boxes(orig_image, cluster_boxes)
+                    if min(edge1, edge2) > 30 and min(edge1, edge2) < 120:
+                        valid_boxes.append(box)
+
+        if len(valid_boxes) > 0:
+            self.draw_cluster_boxes(orig_image, valid_boxes)
 
         return orig_image, []
 
