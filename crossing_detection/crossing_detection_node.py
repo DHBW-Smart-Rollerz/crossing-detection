@@ -21,6 +21,7 @@ from crossing_detection.utils.filter import (
     filter_lines_by_polygon,
 )
 from crossing_detection.utils.helper import normalize_line, normalize_lines
+from crossing_detection.utils.models import TunableParamSet
 from crossing_detection.utils.tools import (
     clip_ego_line_adaptive,
     clip_line_to_vertical_bounds,
@@ -95,93 +96,26 @@ class IntersectionDetector(SmartyNode):
                 "image_path": "resources/img/example.png",
                 "debug": False,
                 "compute_crossing_center": False,
-                # Sharpening parameters
-                "sharpen_enabled": True,
-                "sharpen_strength_top": 1.5,
-                "sharpen_strength_bottom": 1.0,
-                # Distortion enhancement parameters
-                "enhance_distorted_roi_enabled": True,
-                "enhance_distortion_kernel": 5,
-                "enhance_distortion_dilations": 1,
-                # Gap detection debug visualization
-                "debug_line_gap_detection": False,
-                "debug_logging": False,
-                # Edge detection (Canny)
-                "canny_threshold_low": 50,
-                "canny_threshold_high": 75,
-                # Line filtering parameters
-                "line_filter_min_length": 70.0,
-                "line_filter_max_length": 10000.0,
-                "line_angle_tolerance": 10.0,
-                "line_angle_vertical_tolerance": 10.0,
-                "line_distance_threshold": 20.0,
-                "line_fusion_angle_tolerance": 10.0,
-                "line_fusion_center_distance_tolerance": 30.0,
-                # Preprocessing
-                "preprocess_min_line_area": 60,
-                # Solid/Dotted line detection
-                "line_solid_step": 0.05,
-                "line_solid_sample_width": 7,
-                "line_solid_sample_height": 15,
-                "line_solid_white_pixel_threshold": 200,
-                "line_solid_white_patch_ratio": 0.75,
-                "line_solid_below_check_threshold": 0.10,
-                # Gap-based detection
-                "gap_detection_box_half_width": 22,
-                "gap_detection_length_extend": 1.2,
-                "gap_detection_min_gap_count": 2,
-                "gap_detection_gap_size_min": 3,
-                # Line extension checks
-                "line_extension_padding": 40,
-                "line_extension_test_length": 50,
-                # Stop line detection
-                "stop_line_thickness_min": 18,
-                "stop_line_extension_box_half_width": 10,
-                "stop_line_extension_length_extend": 1.2,
-                "stop_line_darkness_threshold_percent": 55,
-                "stop_line_max_y_diff": 300.0,
-                "stop_line_min_y_diff": 100.0,
-                "stop_line_max_x_separation": 380.0,
-                "stop_line_min_x_separation": 280.0,
-                # Ghost crossing centers
-                "ghost_cc_offset_distance": 85.0,
-                "ghost_stop_cc_offset_distance": 100.0,
-                # Line clipping and bounds
-                "ego_line_clip_min_rel": 0.5,
-                "ego_line_clip_max_rel": 0.75,
-                "opp_line_clip_min_rel_base": 0.15,
-                "opp_line_clip_max_rel_base": 0.4,
-                # Lane line detection
-                "ego_line_min_length": 80,
-                "opp_line_min_length": 90,
-                "lane_distance_to_crossing_threshold": 250,
-                "ego_line_angle_tolerance_threshold": 15.0,
-                "ego_line_min_white_ratio_dotted": 20.0,
-                "ego_line_min_white_ratio_solid_straight": 35.0,
-                "ego_line_min_white_ratio_solid_angled": 20.0,
-                "ego_line_max_gap_count": 4,
-                "opp_line_min_white_ratio_straight": 35.0,
-                "opp_line_min_white_ratio_angled": 28.0,
-                # Stop line detection thresholds
-                "stop_line_min_white_ratio_dotted": 20,
-                "stop_line_min_white_ratio_solid": 30,
-                "stop_line_extension_min_white_ratio": 25,
-                "stop_line_extension_max_white_ratio": 10,
-                # ROI and positioning
-                "roi_inset_fraction": 0.1,
-                "roi_right_stop_x_fraction": 0.6,
-                "roi_left_stop_x_fraction": 0.4,
-                "stop_endpoint_search_radius": 30,
-                # Distance and angle checks
-                "horizontal_line_pair_distance_threshold": 100.0,
-                "horizontal_line_pair_vertical_distance_threshold": 150.0,
-                # Corner detection and rectangle validation
-                "corner_detection_max_corners": 4,
-                "corner_detection_quality_level": 0.01,
-                "corner_detection_min_distance": 200,
-                "rectangle_angle_tolerance": 20.0,
-                # Elongate line length
-                "elongate_line_length": 450,
+                # Pipeline parameters
+                "min_wr_dotted_ego": 20.0,
+                "min_wr_solid_ego": 35.0,
+                "min_wr_solid_ego_angled": 20.0,
+                "min_wr_opp": 35.0,
+                "min_wr_opp_angled": 28.0,
+                "min_wr_stop_left_solid": 30,
+                "min_wr_stop_left_dotted": 25,
+                "min_wr_stop_right_solid": 30,
+                "min_wr_stop_right_dotted": 25,
+                "min_gap_count_dotted": 3,
+                "clip_ego_adaptive_min_rel": 0.5,
+                "clip_ego_adaptive_max_rel": 0.75,
+                "clip_opp_adaptive_min_rel": 0.1,
+                "clip_opp_adaptive_max_rel": 0.5,
+                "allowed_corner_error_cc_rect": 30.0,
+                "tolerance_angle_cc_rect": 20.0,
+                "openness_black_pixel_pct_threshold": 55.0,
+                "left_stop_line_min_thickness": 18,
+                "right_stop_line_min_thickness": 18,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -205,232 +139,19 @@ class IntersectionDetector(SmartyNode):
             self.compute_crossing_center = True
 
         try:
-            self.sharpen_enabled = self.get_parameter("sharpen_enabled").value
-            self.sharpen_strength_top = self.get_parameter("sharpen_strength_top").value
-            self.sharpen_strength_bottom = self.get_parameter(
-                "sharpen_strength_bottom"
-            ).value
+            self.debug = self.get_parameter("debug").value
         except Exception:
-            # fallback defaults
-            self.sharpen_enabled = True
-            self.sharpen_strength_top = 1.5
-            self.sharpen_strength_bottom = 1.0
-
-        try:
-            self.enhance_distorted_roi_enabled = self.get_parameter(
-                "enhance_distorted_roi_enabled"
-            ).value
-            self.enhance_distortion_kernel = self.get_parameter(
-                "enhance_distortion_kernel"
-            ).value
-            self.enhance_distortion_dilations = self.get_parameter(
-                "enhance_distortion_dilations"
-            ).value
-        except Exception:
-            self.enhance_distorted_roi_enabled = True
-            self.enhance_distortion_kernel = 5
-            self.enhance_distortion_dilations = 1
-
-        try:
-            self.debug_line_gap_detection = self.get_parameter(
-                "debug_line_gap_detection"
-            ).value
-        except Exception:
-            self.debug_line_gap_detection = False
-
-        try:
-            self.debug_logging = self.get_parameter("debug_logging").value
-        except Exception:
-            self.debug_logging = False
+            self.debug = False
 
         # Configure logger level based on debug_logging parameter
         logger = self.get_logger()
-        if self.debug_logging:
+        if self.debug:
             logger.set_level(rclpy.logging.LoggingSeverity.DEBUG)
         else:
             logger.set_level(rclpy.logging.LoggingSeverity.INFO)
 
-        # Load all pipeline parameters
-        try:
-            self.canny_threshold_low = self.get_parameter("canny_threshold_low").value
-        except Exception:
-            self.canny_threshold_low = 50
-
-        try:
-            self.canny_threshold_high = self.get_parameter("canny_threshold_high").value
-        except Exception:
-            self.canny_threshold_high = 75
-
-        try:
-            self.line_filter_min_length = self.get_parameter(
-                "line_filter_min_length"
-            ).value
-        except Exception:
-            self.line_filter_min_length = 70.0
-
-        try:
-            self.line_filter_max_length = self.get_parameter(
-                "line_filter_max_length"
-            ).value
-        except Exception:
-            self.line_filter_max_length = 10000.0
-
-        try:
-            self.line_angle_tolerance = self.get_parameter("line_angle_tolerance").value
-        except Exception:
-            self.line_angle_tolerance = 10.0
-
-        try:
-            self.line_distance_threshold = self.get_parameter(
-                "line_distance_threshold"
-            ).value
-        except Exception:
-            self.line_distance_threshold = 20.0
-
-        try:
-            self.line_fusion_angle_tolerance = self.get_parameter(
-                "line_fusion_angle_tolerance"
-            ).value
-        except Exception:
-            self.line_fusion_angle_tolerance = 10.0
-
-        try:
-            self.line_fusion_center_distance_tolerance = self.get_parameter(
-                "line_fusion_center_distance_tolerance"
-            ).value
-        except Exception:
-            self.line_fusion_center_distance_tolerance = 30.0
-
-        try:
-            self.gap_detection_box_half_width = self.get_parameter(
-                "gap_detection_box_half_width"
-            ).value
-        except Exception:
-            self.gap_detection_box_half_width = 22
-
-        try:
-            self.gap_detection_length_extend = self.get_parameter(
-                "gap_detection_length_extend"
-            ).value
-        except Exception:
-            self.gap_detection_length_extend = 1.2
-
-        try:
-            self.gap_detection_min_gap_count = self.get_parameter(
-                "gap_detection_min_gap_count"
-            ).value
-        except Exception:
-            self.gap_detection_min_gap_count = 2
-
-        try:
-            self.gap_detection_gap_size_min = self.get_parameter(
-                "gap_detection_gap_size_min"
-            ).value
-        except Exception:
-            self.gap_detection_gap_size_min = 3
-
-        try:
-            self.stop_line_thickness_min = self.get_parameter(
-                "stop_line_thickness_min"
-            ).value
-        except Exception:
-            self.stop_line_thickness_min = 18
-
-        try:
-            self.stop_line_darkness_threshold_percent = self.get_parameter(
-                "stop_line_darkness_threshold_percent"
-            ).value
-        except Exception:
-            self.stop_line_darkness_threshold_percent = 55
-
-        try:
-            self.ghost_cc_offset_distance = self.get_parameter(
-                "ghost_cc_offset_distance"
-            ).value
-        except Exception:
-            self.ghost_cc_offset_distance = 85.0
-
-        try:
-            self.ghost_stop_cc_offset_distance = self.get_parameter(
-                "ghost_stop_cc_offset_distance"
-            ).value
-        except Exception:
-            self.ghost_stop_cc_offset_distance = 100.0
-
-        try:
-            self.lane_distance_to_crossing_threshold = self.get_parameter(
-                "lane_distance_to_crossing_threshold"
-            ).value
-        except Exception:
-            self.lane_distance_to_crossing_threshold = 250
-
-        try:
-            self.ego_line_angle_tolerance_threshold = self.get_parameter(
-                "ego_line_angle_tolerance_threshold"
-            ).value
-        except Exception:
-            self.ego_line_angle_tolerance_threshold = 15.0
-
-        try:
-            self.ego_line_min_white_ratio_dotted = self.get_parameter(
-                "ego_line_min_white_ratio_dotted"
-            ).value
-        except Exception:
-            self.ego_line_min_white_ratio_dotted = 20.0
-
-        try:
-            self.ego_line_min_white_ratio_solid_straight = self.get_parameter(
-                "ego_line_min_white_ratio_solid_straight"
-            ).value
-        except Exception:
-            self.ego_line_min_white_ratio_solid_straight = 35.0
-
-        try:
-            self.ego_line_min_white_ratio_solid_angled = self.get_parameter(
-                "ego_line_min_white_ratio_solid_angled"
-            ).value
-        except Exception:
-            self.ego_line_min_white_ratio_solid_angled = 20.0
-
-        try:
-            self.ego_line_max_gap_count = self.get_parameter(
-                "ego_line_max_gap_count"
-            ).value
-        except Exception:
-            self.ego_line_max_gap_count = 4
-
-        try:
-            self.opp_line_min_white_ratio_straight = self.get_parameter(
-                "opp_line_min_white_ratio_straight"
-            ).value
-        except Exception:
-            self.opp_line_min_white_ratio_straight = 35.0
-
-        try:
-            self.opp_line_min_white_ratio_angled = self.get_parameter(
-                "opp_line_min_white_ratio_angled"
-            ).value
-        except Exception:
-            self.opp_line_min_white_ratio_angled = 28.0
-
-        try:
-            self.stop_line_min_white_ratio_dotted = self.get_parameter(
-                "stop_line_min_white_ratio_dotted"
-            ).value
-        except Exception:
-            self.stop_line_min_white_ratio_dotted = 20
-
-        try:
-            self.stop_line_min_white_ratio_solid = self.get_parameter(
-                "stop_line_min_white_ratio_solid"
-            ).value
-        except Exception:
-            self.stop_line_min_white_ratio_solid = 30
-
-        try:
-            elongate_line_length = self.get_parameter("elongate_line_length").value
-        except Exception:
-            elongate_line_length = 450
+        # Initialize tunable parameter set for use in pipeline
+        self.tunable_params = TunableParamSet(self)
 
         self.debug_visualizer = CrossingDebugVisualizer(node=self)
 
@@ -643,9 +364,9 @@ class IntersectionDetector(SmartyNode):
             ) = is_line_dotted_by_gap_detection(
                 extended_line,
                 image,
-                box_half_width=self.gap_detection_box_half_width,
-                length_extend=self.gap_detection_length_extend,
-                min_gap_count=self.gap_detection_min_gap_count,
+                box_half_width=22,
+                length_extend=1.2,
+                min_gap_count=2,
             )
 
             self.get_logger().debug(
@@ -1141,9 +862,7 @@ class IntersectionDetector(SmartyNode):
                 return None
         return nearest_line
 
-    def calculate_ghost_crossing_centers(
-        self, crossing_center, prominent_angle, offset_distance=None
-    ):
+    def calculate_ghost_crossing_centers(self, crossing_center, prominent_angle):
         """
         Calculate ghost crossing centers offset from main crossing center.
 
@@ -1166,8 +885,7 @@ class IntersectionDetector(SmartyNode):
         if crossing_center is None or prominent_angle is None:
             return None, None
 
-        if offset_distance is None:
-            offset_distance = self.ghost_cc_offset_distance
+        offset_distance = 85
 
         try:
             angle_rad = math.radians(float(prominent_angle))
@@ -1191,9 +909,7 @@ class IntersectionDetector(SmartyNode):
             self.get_logger().error(f"Error calculating ghost CCs: {e}")
             return None, None
 
-    def calculate_stop_line_ghost_centers(
-        self, crossing_center, prominent_angle, offset_distance=None
-    ):
+    def calculate_stop_line_ghost_centers(self, crossing_center, prominent_angle):
         """
         Calculate ghost crossing centers for stop lines (left and right).
 
@@ -1216,8 +932,7 @@ class IntersectionDetector(SmartyNode):
         if crossing_center is None or prominent_angle is None:
             return None, None
 
-        if offset_distance is None:
-            offset_distance = self.ghost_stop_cc_offset_distance
+        offset_distance = 100
 
         try:
             angle_rad = math.radians(float(prominent_angle))
@@ -1381,7 +1096,12 @@ class IntersectionDetector(SmartyNode):
         return None, None
 
     def check_stop_line_crossing_openness(
-        self, stop_line_right, stop_line_left, image_gray
+        self,
+        stop_line_right,
+        stop_line_left,
+        image_gray,
+        black_pixel_threshold: int = 40,
+        black_pixel_pct_threshold: float = 55.0,
     ):
         """
         Check if crossing center area is open (not too dark).
@@ -1423,12 +1143,12 @@ class IntersectionDetector(SmartyNode):
             if x_max > x_min and y_max > y_min:
                 region = image_gray[y_min:y_max, x_min:x_max]
                 total_pixels = region.size
-                black_pixels = np.sum(region < 40)
+                black_pixels = np.sum(region < black_pixel_threshold)
                 black_pct = (
                     (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
                 )
 
-                right_valid = black_pct > 55
+                right_valid = black_pct > black_pixel_pct_threshold
                 self.get_logger().debug(
                     f"RIGHT stop lowest point "
                     f"(x={bottom_x_r:.1f}, y={bottom_y_r:.1f}): "
@@ -1455,12 +1175,12 @@ class IntersectionDetector(SmartyNode):
             if x_max > x_min and y_max > y_min:
                 region = image_gray[y_min:y_max, x_min:x_max]
                 total_pixels = region.size
-                black_pixels = np.sum(region < 40)
+                black_pixels = np.sum(region < black_pixel_threshold)
                 black_pct = (
                     (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
                 )
 
-                left_valid = black_pct > 55
+                left_valid = black_pct > black_pixel_pct_threshold
                 self.get_logger().debug(
                     f"LEFT stop highest point "
                     f"(x={top_x_l:.1f}, y={top_y_l:.1f}): "
@@ -1940,9 +1660,15 @@ class IntersectionDetector(SmartyNode):
             if sorted_corners is not None and interior_angles is not None:
                 corner_error = self.compute_angle_error(interior_angles)
 
-                is_rect = self.is_valid_rectangle(interior_angles, angle_tolerance=20.0)
+                is_rect = self.is_valid_rectangle(
+                    interior_angles,
+                    angle_tolerance=self.tunable_params.tolerance_angle_cc_rect,
+                )
 
-                if corner_error < 30.0 or is_rect:
+                if (
+                    corner_error < self.tunable_params.allowed_corner_error_cc_rect
+                    or is_rect
+                ):
                     center = np.mean(sorted_corners, axis=0).astype(int)
                     self.detected_crossing_center = tuple(center)
                     self.crossing_center_frames = 0
@@ -2015,9 +1741,13 @@ class IntersectionDetector(SmartyNode):
                 image,
                 box_half_width=10,
                 length_extend=1.2,
-                min_gap_count=3,
+                min_gap_count=self.tunable_params.min_gap_count_dotted,
             )
-            min_wr = 25 if stop_dotted_left else 30
+            min_wr = (
+                self.tunable_params.min_wr_stop_left_dotted
+                if stop_dotted_left
+                else self.tunable_params.min_wr_stop_left_solid
+            )
 
             (
                 gaps_ext,
@@ -2053,9 +1783,13 @@ class IntersectionDetector(SmartyNode):
                 image,
                 box_half_width=10,
                 length_extend=1.2,
-                min_gap_count=3,
+                min_gap_count=self.tunable_params.min_gap_count_dotted,
             )
-            min_wr = 25 if stop_dotted_right else 30
+            min_wr = (
+                self.tunable_params.min_wr_stop_right_dotted
+                if stop_dotted_right
+                else self.tunable_params.min_wr_stop_right_solid
+            )
 
             (
                 gaps_ext,
@@ -2155,7 +1889,10 @@ class IntersectionDetector(SmartyNode):
                     self._stop_left_y = stop_y_l
 
         cross_right_open, cross_left_open = self.check_stop_line_crossing_openness(
-            stop_line_right, stop_line_left, image
+            stop_line_right,
+            stop_line_left,
+            image,
+            black_pixel_pct_threshold=self.tunable_params.openness_black_pixel_pct_threshold,
         )
 
         if not cross_right_open:
@@ -2176,7 +1913,11 @@ class IntersectionDetector(SmartyNode):
             stop_line_left, stop_line_right, image
         )
 
-        if left_thickness is not None and left_thickness < 18 and not stop_dotted_left:
+        if (
+            left_thickness is not None
+            and left_thickness < self.tunable_params.left_stop_line_min_thickness
+            and not stop_dotted_left
+        ):
             self.get_logger().debug(
                 f"LEFT stop rejected: thickness {left_thickness:.1f} is too thin"
             )
@@ -2185,7 +1926,7 @@ class IntersectionDetector(SmartyNode):
 
         if (
             right_thickness is not None
-            and right_thickness < 18
+            and right_thickness < self.tunable_params.right_stop_line_min_thickness
             and not stop_dotted_right
         ):
             self.get_logger().debug(
@@ -2248,8 +1989,8 @@ class IntersectionDetector(SmartyNode):
                     ego_line_long,
                     self.get_roi_bbox(image.shape),
                     angle=closest_line_angle,
-                    min_rel_base=0.5,
-                    max_rel_base=0.75,
+                    min_rel_base=self.tunable_params.clip_ego_adaptive_min_rel,
+                    max_rel_base=self.tunable_params.clip_ego_adaptive_max_rel,
                 )
                 (
                     ego_dotted,
@@ -2261,7 +2002,7 @@ class IntersectionDetector(SmartyNode):
                     image,
                     box_half_width=22,
                     length_extend=1.1,
-                    min_gap_count=3,
+                    min_gap_count=self.tunable_params.min_gap_count_dotted,
                 )
 
                 angle_deviation = (
@@ -2270,8 +2011,12 @@ class IntersectionDetector(SmartyNode):
                     else 0.0
                 )
                 is_angled_approach = angle_deviation > 15.0
-                min_wr_ego_dotted = 20.0
-                min_wr_ego_solid = 20.0 if is_angled_approach else 35.0
+                min_wr_ego_dotted = self.tunable_params.min_wr_dotted_ego
+                min_wr_ego_solid = (
+                    self.tunable_params.min_wr_solid_ego
+                    if not is_angled_approach
+                    else self.tunable_params.min_wr_solid_ego_angled
+                )
                 min_wr_ego = min_wr_ego_dotted if ego_dotted else min_wr_ego_solid
 
                 self.get_logger().debug(
@@ -2356,6 +2101,8 @@ class IntersectionDetector(SmartyNode):
                     opp_line_long,
                     self.get_roi_bbox(image.shape),
                     angle=closest_line_angle,
+                    min_rel_base=self.tunable_params.clip_opp_adaptive_min_rel,
+                    max_rel_base=self.tunable_params.clip_opp_adaptive_max_rel,
                 )
 
                 (
@@ -2368,7 +2115,7 @@ class IntersectionDetector(SmartyNode):
                     image,
                     box_half_width=22,
                     length_extend=1.1,
-                    min_gap_count=3,
+                    min_gap_count=self.tunable_params.min_gap_count_dotted,
                 )
 
                 angle_deviation = 0.0
@@ -2379,7 +2126,11 @@ class IntersectionDetector(SmartyNode):
                     angle_deviation = abs(normalized_angle)
 
                 is_angled_approach = angle_deviation > 15.0
-                min_wr_opp = 28.0 if is_angled_approach else 35.0
+                min_wr_opp = (
+                    self.tunable_params.min_wr_opp_angled
+                    if is_angled_approach
+                    else self.tunable_params.min_wr_opp
+                )
 
                 self.get_logger().debug(
                     f"OPP LINE: g={opp_gap_count} wr={wr_opp:.1f}% "
