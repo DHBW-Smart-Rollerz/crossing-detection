@@ -14,6 +14,14 @@ from timing import timer
 
 from crossing_detection.agreggator import IntersectionAggregator
 from crossing_detection.debug_visualizer import CrossingDebugVisualizer
+from crossing_detection.utils.checks import (
+    check_stop_line_crossing_openness,
+    check_stop_line_pair_plausibility,
+    is_ego_roi_and_distance_valid,
+    is_left_stop_line_valid,
+    is_right_stop_line_valid,
+    measure_stop_line_thickness,
+)
 from crossing_detection.utils.filter import (
     filter_by_angle,
     filter_by_bev_black_corner,
@@ -29,6 +37,7 @@ from crossing_detection.utils.tools import (
     clip_opp_line_adaptive,
     elongate_line,
     enhance_by_line_brightness,
+    find_corners_shi_tomasi,
     fuse_similar_lines,
     get_bev_black_corner_polygon,
     is_line_dotted_by_gap_detection,
@@ -570,68 +579,6 @@ class IntersectionDetector(SmartyNode):
 
         return prominent_angle, len(valid_angles)
 
-    def find_corners_shi_tomasi(self, image, roi_bbox=None):
-        """
-        Detect corners using Shi-Tomasi corner detection.
-
-        (cv2.goodFeaturesToTrack).
-
-        This helps identify the edges/corners of the intersection by detecting
-        strong corner features that typically appear at road line junctions.
-
-        Arguments:
-            image -- Grayscale or color image to detect corners in.
-            roi_bbox -- Optional tuple (left, right, top, bottom) to limit
-                        corner detection to a specific region. If None, uses
-                        full image.
-
-        Returns:
-            List of corner coordinates as tuples (x, y), or empty list if no
-            corners are found.
-        """
-        if image is None:
-            return []
-
-        if len(image.shape) == 3:
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        else:
-            gray = image.copy()
-
-        if roi_bbox is not None:
-            roi_left, roi_right, roi_top, roi_bottom = roi_bbox
-            roi_region = gray[roi_top:roi_bottom, roi_left:roi_right]
-        else:
-            roi_left = 0
-            roi_right = gray.shape[1]
-            roi_top = 0
-            roi_bottom = gray.shape[0]
-            roi_region = gray
-
-        try:
-            corners = cv2.goodFeaturesToTrack(
-                roi_region,
-                maxCorners=4,
-                qualityLevel=0.01,
-                minDistance=200,
-                blockSize=3,
-                useHarrisDetector=False,
-            )
-
-            if corners is not None:
-                corners_list = []
-                for corner in corners:
-                    x, y = corner.ravel()
-                    # Add ROI offset if we extracted a region
-                    corners_list.append((int(x + roi_left), int(y + roi_top)))
-                return corners_list
-            else:
-                return []
-
-        except Exception as e:
-            msg = f"Shi-Tomasi corner detection failed: {e}"
-            self.get_logger().warning(msg)
-            return []
-
     def compute_crossing_center_from_corners(self, corners):
         """
         Compute crossing center from Shi-Tomasi corners if they form a rectangle.
@@ -1049,295 +996,6 @@ class IntersectionDetector(SmartyNode):
 
         return True
 
-    def check_stop_line_pair_plausibility(
-        self,
-        stop_line_left,
-        stop_line_right,
-        max_y_diff: float = 30.0,
-        min_y_diff: float = 0.0,
-        max_x_separation: float = 200.0,
-        min_x_separation: float = 50.0,
-    ):
-        """
-        Validate stop lines: accept single lines or plausible pairs.
-
-        If both stop lines exist, they should:
-        - Be at roughly the same vertical position (y-coords close)
-        - Have appropriate horizontal separation (not too close, not too far)
-
-        If only one exists, it's accepted as valid.
-
-        Arguments:
-            stop_line_left -- Left stop line or None
-            stop_line_right -- Right stop line or None
-            max_y_diff -- Max vertical distance between left/right stop (pixels)
-            min_y_diff -- Min vertical distance between left/right stop (pixels)
-            max_x_separation -- Max horizontal separation between stops (pixels)
-            min_x_separation -- Min horizontal separation between stops (pixels)
-
-        Returns:
-            Tuple of (validated_left, validated_right)
-        """
-        if stop_line_left is None and stop_line_right is None:
-            return None, None
-
-        if (stop_line_left is None) != (stop_line_right is None):
-            return stop_line_left, stop_line_right
-
-        if stop_line_left is not None and stop_line_right is not None:
-            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-
-            y_left = (y1_l + y2_l) / 2.0
-            y_right = (y1_r + y2_r) / 2.0
-            x_left = (x1_l + x2_l) / 2.0
-            x_right = (x1_r + x2_r) / 2.0
-
-            y_diff = abs(y_left - y_right)
-            if y_diff > max_y_diff or y_diff < min_y_diff:
-                # Not aligned vertically - likely false positives
-                return None, None
-
-            x_sep = abs(x_right - x_left)
-            if x_sep < min_x_separation or x_sep > max_x_separation:
-                return None, None
-
-            return stop_line_left, stop_line_right
-
-        return None, None
-
-    def check_stop_line_crossing_openness(
-        self,
-        stop_line_right,
-        stop_line_left,
-        image_gray,
-        black_pixel_threshold: int = 40,
-        black_pixel_pct_threshold: float = 55.0,
-    ):
-        """
-        Check if crossing center area is open (not too dark).
-
-        Finds the lowest point of right stop line and highest point of left
-        stop line, then checks if these areas contain < 40% black pixels.
-        This helps reject invalid stop line pairs that close off the
-        crossing.
-
-        Arguments:
-            stop_line_right -- Right stop line as (1,4) array or None
-            stop_line_left -- Left stop line as (1,4) array or None
-            image_gray -- Grayscale image for pixel analysis
-
-        Returns:
-            Tuple (right_valid, left_valid) where each is True/False/None
-        """
-        if image_gray is None or image_gray.size == 0:
-            return None, None
-
-        right_valid = None
-        left_valid = None
-
-        if stop_line_right is not None:
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-            bottom_y_r = max(y1_r, y2_r)
-            bottom_x_r = x1_r if y1_r > y2_r else x2_r
-
-            x_min = int(bottom_x_r - 12)
-            x_max = int(bottom_x_r + 12)
-            y_min = int(bottom_y_r)
-            y_max = int(bottom_y_r + 70)
-
-            x_min = max(0, x_min)
-            x_max = min(image_gray.shape[1], x_max)
-            y_min = max(0, y_min)
-            y_max = min(image_gray.shape[0], y_max)
-
-            if x_max > x_min and y_max > y_min:
-                region = image_gray[y_min:y_max, x_min:x_max]
-                total_pixels = region.size
-                black_pixels = np.sum(region < black_pixel_threshold)
-                black_pct = (
-                    (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
-                )
-
-                right_valid = black_pct > black_pixel_pct_threshold
-                self.get_logger().debug(
-                    f"RIGHT stop lowest point "
-                    f"(x={bottom_x_r:.1f}, y={bottom_y_r:.1f}): "
-                    f"{black_pct:.1f}%"
-                )
-            else:
-                right_valid = False
-
-        if stop_line_left is not None:
-            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-            top_y_l = min(y1_l, y2_l)
-            top_x_l = x1_l if y1_l < y2_l else x2_l
-
-            x_min = int(top_x_l - 12)
-            x_max = int(top_x_l + 12)
-            y_min = int(top_y_l - 70)
-            y_max = int(top_y_l)
-
-            x_min = max(0, x_min)
-            x_max = min(image_gray.shape[1], x_max)
-            y_min = max(0, y_min)
-            y_max = min(image_gray.shape[0], y_max)
-
-            if x_max > x_min and y_max > y_min:
-                region = image_gray[y_min:y_max, x_min:x_max]
-                total_pixels = region.size
-                black_pixels = np.sum(region < black_pixel_threshold)
-                black_pct = (
-                    (black_pixels / total_pixels * 100) if total_pixels > 0 else 0
-                )
-
-                left_valid = black_pct > black_pixel_pct_threshold
-                self.get_logger().debug(
-                    f"LEFT stop highest point "
-                    f"(x={top_x_l:.1f}, y={top_y_l:.1f}): "
-                    f"{black_pct:.1f}%"
-                )
-            else:
-                left_valid = False
-
-        return right_valid, left_valid
-
-    def measure_stop_line_thickness(self, stop_line_left, stop_line_right, image_gray):
-        """
-        Measure the thickness of stop lines using orthogonal crosses.
-
-        Creates an orthogonal line through the middle of each stop line and
-        counts white pixels along that orthogonal to measure line thickness.
-
-        Arguments:
-            stop_line_right -- Right stop line as (1,4) array or None
-            stop_line_left -- Left stop line as (1,4) array or None
-            image_gray -- Grayscale image for pixel analysis
-
-        Returns:
-            Tuple (right_thickness, left_thickness) in pixels
-        """
-        try:
-            if image_gray is None or image_gray.size == 0:
-                return None, None
-
-            right_thickness = None
-            left_thickness = None
-
-            if stop_line_right is not None:
-                try:
-                    x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-
-                    mid_x_r = (x1_r + x2_r) / 2.0
-                    mid_y_r = (y1_r + y2_r) / 2.0
-
-                    dx = x2_r - x1_r
-                    dy = y2_r - y1_r
-                    line_length = np.sqrt(dx**2 + dy**2)
-
-                    if line_length > 0:
-                        dx_norm = dx / line_length
-                        dy_norm = dy / line_length
-
-                        orth_dx = -dy_norm
-                        orth_dy = dx_norm
-
-                        max_dist = 25
-                        thickness = 0
-                        pixel_values = []
-
-                        for dist in range(-max_dist, max_dist + 1):
-                            px = int(mid_x_r + dist * orth_dx)
-                            py = int(mid_y_r + dist * orth_dy)
-
-                            if (
-                                0 <= px < image_gray.shape[1]
-                                and 0 <= py < image_gray.shape[0]
-                            ):
-                                try:
-                                    pv = image_gray[py, px]
-                                    if isinstance(pv, np.ndarray):
-                                        pv = float(pv.flat[0])
-                                    else:
-                                        pv = float(pv)
-                                    pixel_values.append(pv)
-                                    if pv > 100:
-                                        thickness += 1
-                                except (ValueError, IndexError):
-                                    pass
-
-                        right_thickness = thickness
-                        avg_pix = (
-                            sum(pixel_values) / len(pixel_values) if pixel_values else 0
-                        )
-                        self.get_logger().debug(
-                            f"RIGHT thickness: {right_thickness} px, "
-                            f"avg={avg_pix:.0f} "
-                            f"(mid x={mid_x_r:.1f}, y={mid_y_r:.1f})"
-                        )
-                except Exception as e:
-                    self.get_logger().error(f"Error measuring RIGHT thickness: {e}")
-
-            if stop_line_left is not None:
-                try:
-                    x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-
-                    mid_x_l = (x1_l + x2_l) / 2.0
-                    mid_y_l = (y1_l + y2_l) / 2.0
-
-                    dx = x2_l - x1_l
-                    dy = y2_l - y1_l
-                    line_length = np.sqrt(dx**2 + dy**2)
-
-                    if line_length > 0:
-                        dx_norm = dx / line_length
-                        dy_norm = dy / line_length
-
-                        orth_dx = -dy_norm
-                        orth_dy = dx_norm
-
-                        max_dist = 25
-                        thickness = 0
-                        pixel_values = []
-
-                        for dist in range(-max_dist, max_dist + 1):
-                            px = int(mid_x_l + dist * orth_dx)
-                            py = int(mid_y_l + dist * orth_dy)
-
-                            if (
-                                0 <= px < image_gray.shape[1]
-                                and 0 <= py < image_gray.shape[0]
-                            ):
-                                try:
-                                    pv = image_gray[py, px]
-                                    if isinstance(pv, np.ndarray):
-                                        pv = float(pv.flat[0])
-                                    else:
-                                        pv = float(pv)
-                                    pixel_values.append(pv)
-                                    if pv > 100:
-                                        thickness += 1
-                                except (ValueError, IndexError):
-                                    pass
-
-                        left_thickness = thickness
-                        avg_pix = (
-                            sum(pixel_values) / len(pixel_values) if pixel_values else 0
-                        )
-                        self.get_logger().debug(
-                            f"LEFT thickness: {left_thickness} px, "
-                            f"avg={avg_pix:.0f} "
-                            f"(mid x={mid_x_l:.1f}, y={mid_y_l:.1f})"
-                        )
-                except Exception as e:
-                    self.get_logger().error(f"Error measuring LEFT thickness: {e}")
-
-            return left_thickness, right_thickness
-
-        except Exception as e:
-            self.get_logger().error(f"Error in measure_stop_line_thickness: {e}")
-            return None, None
-
     def calculate_roi_quadrants(self, image):
         """
         Split the ROI into 4 quadrants for line detection.
@@ -1678,7 +1336,7 @@ class IntersectionDetector(SmartyNode):
         )
 
         roi_bbox = self.get_roi_bbox(image.shape)
-        detected_corners = self.find_corners_shi_tomasi(image, roi_bbox=roi_bbox)
+        detected_corners = find_corners_shi_tomasi(image, roi_bbox=roi_bbox)
 
         crossing_center = None
         if detected_corners and len(detected_corners) >= 3:
@@ -1730,7 +1388,7 @@ class IntersectionDetector(SmartyNode):
             roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
             crossing_center = (
                 int((roi_left + roi_right) / 2),
-                int(roi_top + (roi_bottom - roi_top) * 0.4),
+                int(roi_top + (roi_bottom - roi_top) * 0.45),
             )
 
         lines = vert + horiz
@@ -1844,19 +1502,6 @@ class IntersectionDetector(SmartyNode):
             else:
                 stop_line_right = None
 
-        if stop_line_right is not None and crossing_center is not None:
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-            stop_y_r = (y1_r + y2_r) / 2.0
-            crossing_y = crossing_center[1]
-            if stop_y_r > crossing_y:
-                stop_line_right = None
-                label_stop_line_right = None
-            else:
-                min_y_r = min(y1_r, y2_r)
-                if min_y_r > crossing_y:
-                    stop_line_right = None
-                    label_stop_line_right = None
-
         roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(image.shape)
         roi_width = roi_right - roi_left
         min_x_inset = roi_left + roi_width * 0.1
@@ -1865,79 +1510,55 @@ class IntersectionDetector(SmartyNode):
         max_x_left_stop = roi_left + roi_width * 0.4
 
         if stop_line_right is not None:
-            x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-            stop_x_r = (x1_r + x2_r) / 2.0
-            if stop_x_r < min_x_inset or stop_x_r > max_x_inset:
+            is_valid, reason = is_right_stop_line_valid(
+                stop_line_right,
+                crossing_center,
+                min_x_inset,
+                max_x_inset,
+                min_x_right_stop,
+            )
+            if not is_valid:
+                self.get_logger().debug(f"RIGHT stop rejected: {reason}")
                 stop_line_right = None
                 label_stop_line_right = None
-            elif stop_x_r < min_x_right_stop:
-                self.get_logger().debug(
-                    f"RIGHT stop rejected: x={stop_x_r:.1f} is too close to "
-                    f"left edge (min={min_x_right_stop:.1f})"
-                )
-                stop_line_right = None
-                label_stop_line_right = None
-            elif crossing_center is not None:
-                crossing_x = crossing_center[0]
-                if stop_x_r < crossing_x:
-                    self.get_logger().debug(
-                        f"RIGHT stop rejected: x={stop_x_r:.1f} is left of "
-                        f"crossing x={crossing_x:.1f}"
-                    )
-                    stop_line_right = None
-                    label_stop_line_right = None
 
-        if stop_line_left is not None and crossing_center is not None:
-            x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
-            stop_y_l = (y1_l + y2_l) / 2.0
-            stop_x_l = (x1_l + x2_l) / 2.0
-            crossing_y = crossing_center[1]
-            crossing_x = crossing_center[0]
-            if stop_x_l > crossing_x:
-                self.get_logger().debug(
-                    f"LEFT stop rejected: x={stop_x_l:.1f} is right of "
-                    f"crossing x={crossing_x:.1f}"
-                )
-                stop_line_left = None
-                label_stop_line_left = None
-            elif stop_x_l > max_x_left_stop:
-                self.get_logger().debug(
-                    f"LEFT stop rejected: x={stop_x_l:.1f} is too close to "
-                    f"right edge (max={max_x_left_stop:.1f})"
-                )
+        if stop_line_left is not None:
+            is_valid, reason = is_left_stop_line_valid(
+                stop_line_left, crossing_center, max_x_left_stop
+            )
+            if not is_valid:
+                self.get_logger().debug(f"LEFT stop rejected: {reason}")
                 stop_line_left = None
                 label_stop_line_left = None
             else:
-                max_y_l = max(y1_l, y2_l)
-                if max_y_l < crossing_y:
-                    stop_line_left = None
-                    label_stop_line_left = None
-                else:
-                    self._stop_left_y = stop_y_l
+                # Store left stop line y for later use
+                x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+                self._stop_left_y = (y1_l + y2_l) / 2.0
 
-        cross_right_open, cross_left_open = self.check_stop_line_crossing_openness(
+        cross_right_open, cross_left_open = check_stop_line_crossing_openness(
             stop_line_right,
             stop_line_left,
             image,
+            self.get_logger(),
             black_pixel_pct_threshold=self.tunable_params.openness_black_pixel_pct_threshold,
         )
 
         if not cross_right_open:
             self.get_logger().debug(
-                "RIGHT stop rejected: crossing closing area too dark"
+                "RIGHT stop rejected: lines in stop line closing area"
             )
             stop_line_right = None
             label_stop_line_right = None
 
         if not cross_left_open:
             self.get_logger().debug(
-                "LEFT stop rejected: crossing closing area too dark"
+                "LEFT stop rejected: lines in stop line closing area too dark"
             )
             stop_line_left = None
             label_stop_line_left = None
 
-        left_thickness, right_thickness = self.measure_stop_line_thickness(
-            stop_line_left, stop_line_right, image
+        left_thickness, right_thickness = measure_stop_line_thickness(
+            stop_line_left, stop_line_right, image, self.get_logger()
         )
 
         if (
@@ -1962,7 +1583,7 @@ class IntersectionDetector(SmartyNode):
             stop_line_right = None
             label_stop_line_right = None
 
-        stop_line_left, stop_line_right = self.check_stop_line_pair_plausibility(
+        stop_line_left, stop_line_right = check_stop_line_pair_plausibility(
             stop_line_left,
             stop_line_right,
             max_y_diff=300.0,
@@ -1987,14 +1608,11 @@ class IntersectionDetector(SmartyNode):
 
         ego_line_long = None
         opp_line_long = None
-        opp_line_extended = None
         pair_plausible = False
         label_ego = None
         label_opp = None
         ego_ghost_cc = None
         opp_ghost_cc = None
-        ego_clip_bounds = None
-        opp_clip_bounds = None
         clipped_ego = None
         clipped_opp = None
 
@@ -2065,40 +1683,12 @@ class IntersectionDetector(SmartyNode):
                     not ego_left_check_fail if clipped_ego is not None else False
                 )
 
-                ego_roi_and_distance_check = False
-                if clipped_ego is not None and crossing_center is not None:
-                    roi_left, roi_right, roi_top, roi_bottom = self.get_roi_bbox(
-                        image.shape
-                    )
-
-                    x1, y1, x2, y2 = (
-                        float(clipped_ego[0][0]),
-                        float(clipped_ego[0][1]),
-                        float(clipped_ego[0][2]),
-                        float(clipped_ego[0][3]),
-                    )
-
-                    in_roi_x = (
-                        roi_left <= x1 <= roi_right and roi_left <= x2 <= roi_right
-                    )
-                    y_tolerance = 10
-                    y_min_tol = roi_top - y_tolerance
-                    y_max_tol = roi_bottom + y_tolerance
-                    in_roi_y = (y_min_tol <= y1 <= y_max_tol) and (
-                        y_min_tol <= y2 <= y_max_tol
-                    )
-
-                    line_center_x = (x1 + x2) / 2.0
-                    line_center_y = (y1 + y2) / 2.0
-                    dist_to_center = math.sqrt(
-                        (line_center_x - crossing_center[0]) ** 2
-                        + (line_center_y - crossing_center[1]) ** 2
-                    )
-                    within_distance = dist_to_center <= 250
-
-                    ego_roi_and_distance_check = (
-                        in_roi_x and in_roi_y and within_distance
-                    )
+                ego_roi_and_distance_check = is_ego_roi_and_distance_valid(
+                    clipped_ego,
+                    crossing_center,
+                    image.shape,
+                    self.get_roi_bbox(image.shape),
+                )
 
                 if (
                     wr_ego >= min_wr_ego

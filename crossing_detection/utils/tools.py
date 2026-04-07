@@ -589,3 +589,66 @@ def get_bev_black_corner_polygon(
         return None
 
     return polygon
+
+
+def find_corners_shi_tomasi(image, roi_bbox=None):
+    """
+    Detect corners using Shi-Tomasi corner detection.
+
+    (cv2.goodFeaturesToTrack).
+
+    This helps identify the edges/corners of the intersection by detecting
+    strong corner features that typically appear at road line junctions.
+
+    Arguments:
+        image -- Grayscale or color image to detect corners in.
+        roi_bbox -- Optional tuple (left, right, top, bottom) to limit
+                    corner detection to a specific region. If None, uses
+                    full image.
+
+    Returns:
+        List of corner coordinates as tuples (x, y), or empty list if no
+        corners are found.
+    """
+    if image is None:
+        return []
+
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+
+    if roi_bbox is not None:
+        roi_left, roi_right, roi_top, roi_bottom = roi_bbox
+        roi_region = gray[roi_top:roi_bottom, roi_left:roi_right]
+    else:
+        roi_left = 0
+        roi_right = gray.shape[1]
+        roi_top = 0
+        roi_bottom = gray.shape[0]
+        roi_region = gray
+
+    try:
+        corners = cv2.goodFeaturesToTrack(
+            roi_region,
+            maxCorners=4,
+            qualityLevel=0.01,
+            minDistance=200,
+            blockSize=3,
+            useHarrisDetector=False,
+        )
+
+        if corners is not None:
+            corners_list = []
+            for corner in corners:
+                x, y = corner.ravel()
+                # Add ROI offset if we extracted a region
+                corners_list.append((int(x + roi_left), int(y + roi_top)))
+            return corners_list
+        else:
+            return []
+
+    except Exception as e:
+        msg = f"Shi-Tomasi corner detection failed: {e}"
+        self.get_logger().warning(msg)
+        return []
