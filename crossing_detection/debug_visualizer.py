@@ -63,7 +63,7 @@ class CrossingDebugVisualizer:
         # Labels and angles
         label=None,
         label2=None,
-        closest_line_angle=None,
+        heading_angle=None,
         # Quadrants
         q1=None,
         q2=None,
@@ -100,11 +100,11 @@ class CrossingDebugVisualizer:
         # PHASE 1: MAIN LINE DETECTION OVERLAYS
         # ============================================================
         if vert is not None:
-            result_image = self._draw_lines(result_image, vert, color=GOLD)
+            result_image = self._draw_lines(result_image, vert, color=GOLD, thickness=3)
 
-        if joined_lines is not None:
+        if horiz is not None:
             result_image = self._draw_lines(
-                result_image, joined_lines, color=YELLOW, thickness=3
+                result_image, horiz, color=BLUE, thickness=3
             )
 
         # ============================================================
@@ -463,8 +463,8 @@ class CrossingDebugVisualizer:
                     0.5,
                     GREEN,
                 )
-            if closest_line_angle is not None:
-                self._draw_angle_arrow(result_image, closest_line_angle)
+            if heading_angle is not None:
+                self._draw_angle_arrow(result_image, heading_angle)
         except Exception:
             pass
 

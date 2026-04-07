@@ -39,6 +39,9 @@ def filter_by_angle(
     vertical = []
     horizontal = []
 
+    if anchor_angle:
+        anchor_angle = (anchor_angle + 360) % 180.0
+
     if lines is None or len(lines) == 0:
         return vertical, horizontal
 
@@ -57,6 +60,7 @@ def filter_by_angle(
             continue
 
         angle = math.degrees(math.atan2(dy, dx))
+
         angle_norm = (angle + 360.0) % 180.0
 
         if anchor_angle is not None and anchor_tolerance is not None:
@@ -69,10 +73,15 @@ def filter_by_angle(
             if perp_diff > 90.0:
                 perp_diff = 180.0 - perp_diff
 
-            if angle_diff <= anchor_tolerance:
-                vertical.append(line)
-            elif perp_diff <= anchor_tolerance:
-                horizontal.append(line)
+            # Classify: choose the CLOSEST category
+            if angle_diff < perp_diff:
+                # Line is closer to anchor angle (parallel)
+                if angle_diff <= anchor_tolerance:
+                    vertical.append(line)
+            else:
+                # Line is closer to perpendicular angle
+                if perp_diff <= anchor_tolerance:
+                    horizontal.append(line)
         else:
             dist_h = min(abs(angle_norm - 0.0), abs(angle_norm - 180.0))
             dist_v = min(abs(angle_norm - 80.0), abs(angle_norm - 100.0))

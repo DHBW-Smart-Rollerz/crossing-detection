@@ -755,7 +755,7 @@ class SurfacePatternDetector(SmartyNode):
 
         return fused
 
-    def find_prominent_angle_in_quadrants(self, lines):
+    def find_heading_angle(self, lines):
         """
         Find the prominent angle from all detected lines using histogram.
 
@@ -1069,7 +1069,7 @@ class SurfacePatternDetector(SmartyNode):
         lines = self._normalize_lines(lines)
         lines = self.filter_by_length(lines, min_length=30, max_length=110)
 
-        prominent_angle, _ = self.find_prominent_angle_in_quadrants(lines)
+        prominent_angle, _ = self.find_heading_angle(lines)
 
         self._draw_angle_arrow(orig_image, prominent_angle)
 

@@ -118,7 +118,10 @@ class IntersectionDetector(SmartyNode):
                 "openness_black_pixel_pct_threshold": 55.0,
                 "left_stop_line_min_thickness": 18,
                 "right_stop_line_min_thickness": 18,
-                "fuse_lines_distance_tolerance": 80,
+                "fuse_lines_distance_tolerance": 100,
+                "bev_dead_area_corner_height_rel": 0.73,
+                "bev_dead_area_corner_width_rel": 0.4,
+                "heading_filter_angle_tolerance": 15.0,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -496,7 +499,7 @@ class IntersectionDetector(SmartyNode):
             self.get_logger().error(f"Error in check_line_by_vertical_extension: {e}")
             return None, None, None
 
-    def find_prominent_angle_in_quadrants(self, lines, image):
+    def find_heading_angle(self, lines, image):
         """
         Find the prominent angle from all detected lines using histogram.
 
@@ -980,12 +983,17 @@ class IntersectionDetector(SmartyNode):
 
         lines_candidates = []
 
+        print(len(horiz_lines))
+        print(search_center)
+
         for line in horiz_lines:
             x1, y1, x2, y2 = line[0]
             line_center = ((x1 + x2) / 2, (y1 + y2) / 2)
 
-            if line_center[1] > crossing_center[1]:
+            if line_center[1] > search_center[1]:
                 lines_candidates.append(line)
+
+        print(len(lines_candidates))
 
         for line in lines_candidates:
             x1, y1, x2, y2 = line[0]
@@ -1592,26 +1600,34 @@ class IntersectionDetector(SmartyNode):
         transformed_lines = self.line_segment_detector(edges)
         transformed_lines = normalize_lines(transformed_lines)
 
-        filtered_lines = filter_by_length(transformed_lines, min_length=20)
+        filtered_lines = filter_by_length(transformed_lines, min_length=30)
         filtered_lines = filter_by_roi(filtered_lines, image.shape)
 
+        dead_area_bev = get_bev_black_corner_polygon(
+            image.shape,
+            corner_height_rel=self.tunable_params.bev_dead_area_corner_height_rel,
+            corner_width_rel=self.tunable_params.bev_dead_area_corner_width_rel,
+        )
+        filtered_lines = filter_by_bev_black_corner(filtered_lines, dead_area_bev)
+
+        filtered_lines = fuse_similar_lines(
+            filtered_lines,
+            angle_tol_deg=10,
+            center_dist_tol=self.tunable_params.fuse_lines_distance_tolerance,
+        )
+
         if filtered_lines and len(filtered_lines) > 0:
-            image = enhance_by_line_brightness(image, filtered_lines, percentile=90)
+            image = enhance_by_line_brightness(
+                image,
+                filtered_lines,
+                percentile=90,
+            )
 
         if len(image.shape) == 3:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         image = np.uint8(image)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(30, 30))
         image = clahe.apply(image)
-
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            image, connectivity=8
-        )
-        output_image = np.zeros_like(image)
-        for label in range(1, num_labels):  # Skip background (label 0)
-            if stats[label, cv2.CC_STAT_AREA] >= 60:
-                output_image[labels == label] = image[labels == label]
-        image = output_image
 
         return image
 
@@ -1635,7 +1651,9 @@ class IntersectionDetector(SmartyNode):
         filtered_lines = filter_by_roi(lines, image.shape)
 
         dead_area_bev = get_bev_black_corner_polygon(
-            image.shape, corner_height_rel=0.73, corner_width_rel=0.4
+            image.shape,
+            corner_height_rel=self.tunable_params.bev_dead_area_corner_height_rel,
+            corner_width_rel=self.tunable_params.bev_dead_area_corner_width_rel,
         )
         cv2.drawContours(orig_image, [dead_area_bev], -1, (0, 255, 0), thickness=2)
         filtered_lines = filter_by_bev_black_corner(filtered_lines, dead_area_bev)
@@ -1646,16 +1664,16 @@ class IntersectionDetector(SmartyNode):
             center_dist_tol=self.tunable_params.fuse_lines_distance_tolerance,
         )
 
-        closest_line_angle = None
+        heading_angle = None
         if fused_lines is not None and len(fused_lines) > 0:
-            closest_line_angle, line_count = self.find_prominent_angle_in_quadrants(
-                fused_lines, orig_image
-            )
+            heading_angle, line_count = self.find_heading_angle(fused_lines, orig_image)
+
+        fused_lines = filter_by_length(fused_lines, min_length=40)
 
         vert, horiz = filter_by_angle(
             fused_lines,
-            anchor_angle=closest_line_angle,
-            anchor_tolerance=10.0,
+            anchor_angle=heading_angle,
+            anchor_tolerance=self.tunable_params.heading_filter_angle_tolerance,
             tol_deg=5,
         )
 
@@ -1723,9 +1741,7 @@ class IntersectionDetector(SmartyNode):
             (
                 left_stop_ghost_cc,
                 right_stop_ghost_cc,
-            ) = self.calculate_stop_line_ghost_centers(
-                crossing_center, closest_line_angle
-            )
+            ) = self.calculate_stop_line_ghost_centers(crossing_center, heading_angle)
 
         if left_stop_ghost_cc is None and right_stop_ghost_cc is None:
             stop_line_left = self.find_line_in_quadrant(lines, q1, min_length=60)
@@ -1964,7 +1980,7 @@ class IntersectionDetector(SmartyNode):
 
         vert, horiz = filter_by_angle(
             fused_lines,
-            anchor_angle=closest_line_angle,
+            anchor_angle=heading_angle,
             anchor_tolerance=10.0,
             tol_deg=5,
         )
@@ -1984,7 +2000,7 @@ class IntersectionDetector(SmartyNode):
 
         if crossing_center is not None:
             ego_ghost_cc, opp_ghost_cc = self.calculate_ghost_crossing_centers(
-                crossing_center, closest_line_angle
+                crossing_center, heading_angle
             )
 
             ego_line = self.find_ego_line(horiz, crossing_center, ghost_cc=ego_ghost_cc)
@@ -1999,7 +2015,7 @@ class IntersectionDetector(SmartyNode):
                 clipped_ego, ego_clip_bounds = clip_ego_line_adaptive(
                     ego_line_long,
                     self.get_roi_bbox(image.shape),
-                    angle=closest_line_angle,
+                    angle=heading_angle,
                     min_rel_base=self.tunable_params.clip_ego_adaptive_min_rel,
                     max_rel_base=self.tunable_params.clip_ego_adaptive_max_rel,
                 )
@@ -2017,9 +2033,7 @@ class IntersectionDetector(SmartyNode):
                 )
 
                 angle_deviation = (
-                    abs(90 - closest_line_angle)
-                    if closest_line_angle is not None
-                    else 0.0
+                    abs(90 - heading_angle) if heading_angle is not None else 0.0
                 )
                 is_angled_approach = angle_deviation > 15.0
                 min_wr_ego_dotted = self.tunable_params.min_wr_dotted_ego
@@ -2111,7 +2125,7 @@ class IntersectionDetector(SmartyNode):
                 clipped_opp, opp_clip_bounds = clip_opp_line_adaptive(
                     opp_line_long,
                     self.get_roi_bbox(image.shape),
-                    angle=closest_line_angle,
+                    angle=heading_angle,
                     min_rel_base=self.tunable_params.clip_opp_adaptive_min_rel,
                     max_rel_base=self.tunable_params.clip_opp_adaptive_max_rel,
                 )
@@ -2130,8 +2144,8 @@ class IntersectionDetector(SmartyNode):
                 )
 
                 angle_deviation = 0.0
-                if closest_line_angle is not None:
-                    normalized_angle = closest_line_angle
+                if heading_angle is not None:
+                    normalized_angle = heading_angle
                     if normalized_angle > 90:
                         normalized_angle = 180 - normalized_angle
                     angle_deviation = abs(normalized_angle)
@@ -2294,8 +2308,8 @@ class IntersectionDetector(SmartyNode):
             stop_dotted_right=(
                 stop_dotted_right if stop_right_for_agg is not None else None
             ),
-            ego_angle=closest_line_angle,
-            opp_angle=closest_line_angle,
+            ego_angle=heading_angle,
+            opp_angle=heading_angle,
         )
 
         crossing_type = self.intersection_aggregator.get_crossing_type()
@@ -2336,7 +2350,7 @@ class IntersectionDetector(SmartyNode):
             label_stop_line_right=label_stop_line_right,
             label=label_ego,
             label2=label_opp,
-            closest_line_angle=closest_line_angle,
+            heading_angle=heading_angle,
             q1=q1,
             q2=q2,
             q3=q3,

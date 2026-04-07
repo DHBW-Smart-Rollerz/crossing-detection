@@ -69,6 +69,15 @@ class TunableParamSet:
         self.right_stop_line_min_thickness = get_param(
             "right_stop_line_min_thickness", 18
         )
+        self.bev_dead_area_corner_height_rel = get_param(
+            "bev_dead_area_corner_height_rel", 0.73
+        )
+        self.bev_dead_area_corner_width_rel = get_param(
+            "bev_dead_area_corner_width_rel", 0.4
+        )
+        self.heading_filter_angle_tolerance = get_param(
+            "heading_filter_angle_tolerance", 15.0
+        )
 
         for param_name, param_value in self.__dict__.items():
             logger.info(f"Loaded parameter: {param_name} = {param_value}")
