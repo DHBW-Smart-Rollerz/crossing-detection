@@ -39,6 +39,9 @@ class TunableParamSet:
             except Exception:
                 return default
 
+        self.fuse_lines_distance_tolerance = get_param(
+            "fuse_lines_distance_tolerance", 80
+        )
         self.min_wr_dotted_ego = get_param("min_wr_dotted_ego", 20.0)
         self.min_wr_solid_ego = get_param("min_wr_solid_ego", 35.0)
         self.min_wr_solid_ego_angled = get_param("min_wr_solid_ego_angled", 20.0)

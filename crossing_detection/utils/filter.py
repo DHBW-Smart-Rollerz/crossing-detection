@@ -180,3 +180,46 @@ def filter_lines_by_polygon(lines, polygon, require_full=True):
                 filtered.append(nl)
 
     return filtered
+
+
+def filter_by_bev_black_corner(lines, black_polygon):
+    """
+    Filter lines whose center point is in the BEV black corner area.
+
+    Lines with their midpoint inside the black corner area (created by the
+    BEV transform) are removed from the list.
+
+    Arguments:
+        lines -- List of lines as pairs of points
+        black_polygon -- Polygon (Nx2) from get_bev_black_corner_polygon
+
+    Returns:
+        Filtered list of lines (excludes lines in black corner)
+    """
+    if lines is None or len(lines) == 0:
+        return []
+
+    # Get the black corner polygon
+    if black_polygon is None:
+        return lines
+
+    # Ensure polygon is the correct type for OpenCV
+    black_polygon = np.asarray(black_polygon, dtype=np.int32)
+
+    filtered = []
+    for line in lines:
+        nl = normalize_line(line)
+        x1, y1, x2, y2 = nl[0].astype(float)
+
+        # Calculate line center
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+
+        # Check if center is inside the black area
+        is_inside = cv2.pointPolygonTest(black_polygon, (center_x, center_y), False)
+
+        # Only keep lines whose center is NOT in the black area
+        if is_inside < 0:
+            filtered.append(line)
+
+    return filtered

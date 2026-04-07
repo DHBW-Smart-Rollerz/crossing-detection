@@ -16,6 +16,7 @@ from crossing_detection.agreggator import IntersectionAggregator
 from crossing_detection.debug_visualizer import CrossingDebugVisualizer
 from crossing_detection.utils.filter import (
     filter_by_angle,
+    filter_by_bev_black_corner,
     filter_by_length,
     filter_by_roi,
     filter_lines_by_polygon,
@@ -29,6 +30,7 @@ from crossing_detection.utils.tools import (
     elongate_line,
     enhance_by_line_brightness,
     fuse_similar_lines,
+    get_bev_black_corner_polygon,
     is_line_dotted_by_gap_detection,
     perform_canny,
 )
@@ -116,6 +118,7 @@ class IntersectionDetector(SmartyNode):
                 "openness_black_pixel_pct_threshold": 55.0,
                 "left_stop_line_min_thickness": 18,
                 "right_stop_line_min_thickness": 18,
+                "fuse_lines_distance_tolerance": 80,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -1631,8 +1634,16 @@ class IntersectionDetector(SmartyNode):
         lines = filter_by_length(lines, min_length=20)
         filtered_lines = filter_by_roi(lines, image.shape)
 
+        dead_area_bev = get_bev_black_corner_polygon(
+            image.shape, corner_height_rel=0.73, corner_width_rel=0.4
+        )
+        cv2.drawContours(orig_image, [dead_area_bev], -1, (0, 255, 0), thickness=2)
+        filtered_lines = filter_by_bev_black_corner(filtered_lines, dead_area_bev)
+
         fused_lines = fuse_similar_lines(
-            filtered_lines, angle_tol_deg=10, center_dist_tol=100
+            filtered_lines,
+            angle_tol_deg=10,
+            center_dist_tol=self.tunable_params.fuse_lines_distance_tolerance,
         )
 
         closest_line_angle = None

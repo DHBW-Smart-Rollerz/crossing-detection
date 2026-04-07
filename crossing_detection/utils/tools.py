@@ -506,3 +506,86 @@ def is_line_dotted_by_gap_detection(
 
     except Exception as e:
         return False, 0, 0.0, 0
+
+
+def get_bev_black_corner_polygon(
+    img_shape,
+    corner="bottom_left",
+    corner_height_rel=0.2,
+    corner_width_rel=0.15,
+):
+    """
+    Calculate the black area polygon created by BEV transform in image corners.
+
+    The BEV (Bird's Eye View) transform creates black/invalid areas in the
+    corners of the transformed image. This function calculates those regions
+    as polygons so lines in those areas can be filtered out.
+
+    Arguments:
+        img_shape -- Tuple of (height, width) or full image shape
+        corner -- Which corner to calculate: "bottom_left", "bottom_right",
+                  "top_left", "top_right"
+        corner_height_rel -- Height of corner area as relative portion of
+                             image height (0.0-1.0)
+        corner_width_rel -- Width of corner area as relative portion of
+                            image width (0.0-1.0)
+
+    Returns:
+        Numpy array polygon (Nx2) with corner vertices in clockwise order,
+        or None if invalid corner specified
+    """
+    if isinstance(img_shape, tuple) and len(img_shape) >= 2:
+        height = img_shape[0]
+        width = img_shape[1]
+    else:
+        height = img_shape.shape[0]
+        width = img_shape.shape[1]
+
+    corner_h = int(height * corner_height_rel)
+    corner_w = int(width * corner_width_rel)
+
+    if corner == "bottom_left":
+        # Bottom-left corner polygon: (0, height) -> (corner_w, height)
+        # -> (0, height - corner_h) -> (0, height)
+        polygon = np.array(
+            [
+                [0, height],
+                [corner_w, height],
+                [0, height - corner_h],
+            ],
+            dtype=np.int32,
+        )
+    elif corner == "bottom_right":
+        # Bottom-right corner
+        polygon = np.array(
+            [
+                [width, height],
+                [width - corner_w, height],
+                [width, height - corner_h],
+            ],
+            dtype=np.int32,
+        )
+    elif corner == "top_left":
+        # Top-left corner
+        polygon = np.array(
+            [
+                [0, 0],
+                [corner_w, 0],
+                [0, corner_h],
+            ],
+            dtype=np.int32,
+        )
+    elif corner == "top_right":
+        # Top-right corner
+        polygon = np.array(
+            [
+                [width, 0],
+                [width - corner_w, 0],
+                [width, corner_h],
+            ],
+            dtype=np.int32,
+        )
+    else:
+        return None
+
+    return polygon
