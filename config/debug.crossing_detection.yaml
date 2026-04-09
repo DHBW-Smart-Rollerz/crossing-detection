@@ -32,3 +32,5 @@ crossing_detection_node:
 
     # Gap detection debug visualization - ENABLED
     debug_line_gap_detection: false
+
+    stability_lookback: 4

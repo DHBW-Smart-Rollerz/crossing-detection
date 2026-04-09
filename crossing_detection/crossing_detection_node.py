@@ -138,6 +138,7 @@ class IntersectionDetector(SmartyNode):
                 "heading_filter_angle_tolerance": 15.0,
                 "default_cc_vertical_pos_relative": 0.5,
                 "ego_valid_dist_to_cc_max": 250,
+                "stability_lookback": 2,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -204,7 +205,10 @@ class IntersectionDetector(SmartyNode):
                 msg_out = std_msgs.msg.Float32MultiArray(
                     data=[float(x) for x in result_list]
                 )
-                self.result_publisher.publish(msg_out)
+                if self.intersection_aggregator.is_crossing_stable(
+                    lookback=self.tunable_params.stability_lookback
+                ):
+                    self.result_publisher.publish(msg_out)
             except Exception as e:
                 self.get_logger().error(f"publishing result failed: {e}")
 
@@ -1579,7 +1583,9 @@ class IntersectionDetector(SmartyNode):
         )
 
         crossing_type = self.intersection_aggregator.get_crossing_type()
-        is_stable = self.intersection_aggregator.is_crossing_stable()
+        is_stable = self.intersection_aggregator.is_crossing_stable(
+            lookback=self.tunable_params.stability_lookback
+        )
         buffer_levels = self.intersection_aggregator.get_buffer_levels()
         overall_confidence = self.intersection_aggregator.get_overall_confidence()
         stability_scores = self.intersection_aggregator.get_stability_score()

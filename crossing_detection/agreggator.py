@@ -308,17 +308,28 @@ class IntersectionAggregator:
 
         return crossing_type_str
 
-    def is_crossing_stable(self):
+    def is_crossing_stable(self, lookback=2):
         """
         Check if the crossing state is stable (same for 2+ frames).
 
+        Compares the current state with the last 'lookback' states.
+        Returns True only if all lookback states match the current state.
+
+        Arguments:
+            lookback -- Number of previous states to compare with (default 2)
+
         Returns:
-            True if current crossing state == previous state,
+            True if current crossing state == all previous lookback states,
             False otherwise
         """
-        if len(self.last_states) > 1:
-            return self.last_states[-1] == self.last_states[-2]
-        return False
+        if len(self.last_states) < lookback + 1:
+            return False
+
+        current_state = self.last_states[-1]
+        for i in range(1, lookback + 1):
+            if self.last_states[-i - 1] != current_state:
+                return False
+        return True
 
     def get_overall_confidence(self):
         """

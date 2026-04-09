@@ -82,6 +82,7 @@ class TunableParamSet:
             "default_cc_vertical_pos_relative", 0.5
         )
         self.ego_valid_dist_to_cc_max = get_param("ego_valid_dist_to_cc_max", 250)
+        self.stability_lookback = get_param("stability_lookback", 2)
 
         for param_name, param_value in self.__dict__.items():
             logger.info(f"Loaded parameter: {param_name} = {param_value}")
