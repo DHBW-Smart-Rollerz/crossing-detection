@@ -7,7 +7,6 @@ import numpy as np
 import rclpy
 import sensor_msgs.msg
 import std_msgs.msg
-from sklearn.cluster import DBSCAN
 from smarty_utils.enums import NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
@@ -39,7 +38,6 @@ from crossing_detection.utils.helper import normalize_line, normalize_lines
 from crossing_detection.utils.models import TunableParamSet
 from crossing_detection.utils.tools import (
     clip_ego_line_adaptive,
-    clip_line_to_vertical_bounds,
     clip_opp_line_adaptive,
     elongate_line,
     enhance_by_line_brightness,
@@ -990,6 +988,7 @@ class IntersectionDetector(SmartyNode):
             corner_height_rel=self.tunable_params.bev_dead_area_corner_height_rel,
             corner_width_rel=self.tunable_params.bev_dead_area_corner_width_rel,
         )
+
         cv2.drawContours(orig_image, [dead_area_bev], -1, (0, 255, 0), thickness=2)
         filtered_lines = filter_by_bev_black_corner(filtered_lines, dead_area_bev)
 

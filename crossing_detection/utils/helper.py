@@ -5,6 +5,7 @@ This module contains utility functions like normalize_line that are shared
 across the crossing detection module.
 """
 
+import cv2
 import numpy as np
 
 
