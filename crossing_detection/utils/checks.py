@@ -441,3 +441,99 @@ def is_ego_roi_and_distance_valid(clipped_line, crossing_center, image_shape, ro
     within_distance = dist_to_center <= 250
 
     return in_roi_x and in_roi_y and within_distance
+
+
+def check_plausibility_horizontal_line_pair(
+    opp_line,
+    ego_line,
+    intersection_point,
+    line_horizontal_distance_threshold: float = 100.0,
+    line_vertical_distance_threshold: float = 150.0,
+    center_horizontal_distance_threshold: float = 100.0,
+    negative_line_overlap_threshold: float = -80.0,
+):
+    """
+    Check the plausibility of a pair of horizontal lines.
+
+    Arguments:
+        line1 -- First horizontal line as a pair of points.
+        line2 -- Second horizontal line as a pair of points.
+        intersection_point -- Intersection point as (x, y).
+
+    Returns:
+        True if the pair is plausible, False otherwise.
+    """
+    x1_1, y1_1, x2_1, y2_1 = ego_line[0]
+    x1_2, y1_2, x2_2, y2_2 = opp_line[0]
+    ego_line_leftmost = min(x1_1, x2_1)
+    opp_line_rightmost = max(x1_2, x2_2)
+    distance_between_lines_horizontal = ego_line_leftmost - opp_line_rightmost
+    if distance_between_lines_horizontal > line_horizontal_distance_threshold:
+        return False
+
+    distance_between_lines_vertical = abs(((y1_1 + y2_1) / 2) - ((y1_2 + y2_2) / 2))
+    if distance_between_lines_vertical < line_vertical_distance_threshold:
+        return False
+
+    return True
+
+
+def check_line_right_y_pos(stop_line_right, opp_line_long):
+    """
+    Check if right stop line is above opp line (valid y position).
+
+    Arguments:
+        stop_line_right -- Right stop line as (1,4) array or None
+        opp_line_long -- Opp line as (1,4) array or None
+
+    Returns:
+        Boolean indicating if check passes (True if stop_y >= opp_y)
+    """
+    if stop_line_right is None or opp_line_long is None:
+        return True
+
+    x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
+    opp_y = (y1_o + y2_o) / 2.0
+    x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
+    stop_y_r = (y1_r + y2_r) / 2.0
+
+    return stop_y_r >= opp_y
+
+
+def check_line_left_y_pos(stop_line_left, ego_line_long, opp_line_long):
+    """
+    Check if left stop line is in valid y position relative to ego/opp.
+
+    Validates:
+    - Stop line below ego line (left_y < ego_y)
+    - Stop line above opp line (left_y > opp_y)
+
+    Arguments:
+        stop_line_left -- Left stop line as (1,4) array or None
+        ego_line_long -- Ego line as (1,4) array or None
+        opp_line_long -- Opp line as (1,4) array or None
+
+    Returns:
+        Boolean indicating if both checks pass
+    """
+    if stop_line_left is None:
+        return True
+
+    x1_l, y1_l, x2_l, y2_l = stop_line_left[0]
+    left_y = (y1_l + y2_l) / 2.0
+
+    # Check with ego line
+    if ego_line_long is not None:
+        x1_e, y1_e, x2_e, y2_e = ego_line_long[0]
+        ego_y = (y1_e + y2_e) / 2.0
+        if left_y >= ego_y:
+            return False
+
+    # Check with opp line
+    if opp_line_long is not None:
+        x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
+        opp_y = (y1_o + y2_o) / 2.0
+        if left_y <= opp_y:
+            return False
+
+    return True

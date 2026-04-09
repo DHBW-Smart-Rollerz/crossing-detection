@@ -8,7 +8,7 @@ crossing_detection_node:
     result_publisher: "/crossing_detection/result"
 
     # State management - ACTIVE for debugging
-    state: 1 # 0=NONE, 1=IDLE, 2=ACTIVE
+    state: 1 # 0=NONE, 1=ACTIVE, 2=RESET
 
     # File paths
     image_path: "resources/img/example.png"

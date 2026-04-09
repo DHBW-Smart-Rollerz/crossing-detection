@@ -15,6 +15,9 @@ from timing import timer
 from crossing_detection.agreggator import IntersectionAggregator
 from crossing_detection.debug_visualizer import CrossingDebugVisualizer
 from crossing_detection.utils.checks import (
+    check_line_left_y_pos,
+    check_line_right_y_pos,
+    check_plausibility_horizontal_line_pair,
     check_stop_line_crossing_openness,
     check_stop_line_pair_plausibility,
     is_ego_roi_and_distance_valid,
@@ -961,41 +964,6 @@ class IntersectionDetector(SmartyNode):
                 return None
         return nearest_line
 
-    def check_plausibility_horizontal_line_pair(
-        self,
-        opp_line,
-        ego_line,
-        intersection_point,
-        line_horizontal_distance_threshold: float = 100.0,
-        line_vertical_distance_threshold: float = 150.0,
-        center_horizontal_distance_threshold: float = 100.0,
-        negative_line_overlap_threshold: float = -80.0,
-    ):
-        """
-        Check the plausibility of a pair of horizontal lines.
-
-        Arguments:
-            line1 -- First horizontal line as a pair of points.
-            line2 -- Second horizontal line as a pair of points.
-            intersection_point -- Intersection point as (x, y).
-
-        Returns:
-            True if the pair is plausible, False otherwise.
-        """
-        x1_1, y1_1, x2_1, y2_1 = ego_line[0]
-        x1_2, y1_2, x2_2, y2_2 = opp_line[0]
-        ego_line_leftmost = min(x1_1, x2_1)
-        opp_line_rightmost = max(x1_2, x2_2)
-        distance_between_lines_horizontal = ego_line_leftmost - opp_line_rightmost
-        if distance_between_lines_horizontal > line_horizontal_distance_threshold:
-            return False
-
-        distance_between_lines_vertical = abs(((y1_1 + y2_1) / 2) - ((y1_2 + y2_2) / 2))
-        if distance_between_lines_vertical < line_vertical_distance_threshold:
-            return False
-
-        return True
-
     def calculate_roi_quadrants(self, image):
         """
         Split the ROI into 4 quadrants for line detection.
@@ -1757,7 +1725,6 @@ class IntersectionDetector(SmartyNode):
                 opp_location_valid = self.is_line_in_quadrant(clipped_opp, q1q2)
                 self.get_logger().debug(f"valid={opp_location_valid}")
 
-                opp_line_extended = None
                 (
                     opp_check_fail,
                     opp_line_ext_right,
@@ -1797,33 +1764,21 @@ class IntersectionDetector(SmartyNode):
             )
 
             if ego_line_long is not None and opp_line_long is not None:
-                pair_plausible = self.check_plausibility_horizontal_line_pair(
+                pair_plausible = check_plausibility_horizontal_line_pair(
                     opp_line_long, ego_line_long, crossing_center
                 )
 
             if stop_line_right is not None and opp_line_long is not None:
-                x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
-                opp_y = (y1_o + y2_o) / 2.0
-                x1_r, y1_r, x2_r, y2_r = stop_line_right[0]
-                stop_y_r = (y1_r + y2_r) / 2.0
-                if stop_y_r < opp_y:
+                if not check_line_right_y_pos(stop_line_right, opp_line_long):
                     stop_line_right = None
                     label_stop_line_right = None
 
-            if stop_line_left is not None and self._stop_left_y is not None:
-                if ego_line_long is not None:
-                    x1_e, y1_e, x2_e, y2_e = ego_line_long[0]
-                    ego_y = (y1_e + y2_e) / 2.0
-                    if self._stop_left_y >= ego_y:
-                        stop_line_left = None
-                        label_stop_line_left = None
-
-                if stop_line_left is not None and opp_line_long is not None:
-                    x1_o, y1_o, x2_o, y2_o = opp_line_long[0]
-                    opp_y = (y1_o + y2_o) / 2.0
-                    if self._stop_left_y <= opp_y:
-                        stop_line_left = None
-                        label_stop_line_left = None
+            if stop_line_left is not None:
+                if not check_line_left_y_pos(
+                    stop_line_left, ego_line_long, opp_line_long
+                ):
+                    stop_line_left = None
+                    label_stop_line_left = None
 
         else:
             self.get_logger().debug(
