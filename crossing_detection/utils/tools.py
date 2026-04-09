@@ -8,6 +8,7 @@ import math
 
 import cv2
 import numpy as np
+from sklearn.decomposition import PCA
 
 from crossing_detection.utils.helper import normalize_line, normalize_lines
 
@@ -169,10 +170,12 @@ def fuse_similar_lines(
             fused.append(normalized[group_idx[0]])
             continue
 
-        mean = pts.mean(axis=0)
-        U, S, Vt = np.linalg.svd(pts - mean)
-        axis = Vt[0]
+        # Use sklearn PCA to get the main axis
+        pca = PCA(n_components=1)
+        pca.fit(pts)
+        axis = pca.components_[0]
 
+        mean = pts.mean(axis=0)
         scalars = (pts - mean).dot(axis)
         min_s = scalars.min()
         max_s = scalars.max()
@@ -652,3 +655,78 @@ def find_corners_shi_tomasi(image, roi_bbox=None):
         msg = f"Shi-Tomasi corner detection failed: {e}"
         self.get_logger().warning(msg)
         return []
+
+
+def find_heading_angle(lines, logger=None):
+    """
+    Find the prominent angle from all detected lines using histogram.
+
+    Builds a histogram of angles from all lines, keeping only those
+    within ±45° of 90° (vertical), and finds the peak angle.
+
+    Arguments:
+        lines -- List of detected lines (each line is [[x1, y1, x2, y2]])
+        image -- Input image (unused, kept for compatibility)
+
+    Returns:
+        Tuple of (prominent_angle_deg, line_count) or (None, 0) if invalid
+    """
+    log_stuff = logger is not None
+
+    if lines is None or len(lines) == 0 and log_stuff:
+        logger.debug("No lines provided to histogram")
+        return None, 0
+
+    valid_angles = []
+    lines_filtered_by_angle = 0
+
+    for line in lines:
+        try:
+            nl = normalize_line(line)
+            if nl is None:
+                continue
+
+            x1, y1, x2, y2 = nl[0].astype(int)
+
+            dx = x2 - x1
+            dy = y2 - y1
+
+            if dx == 0 and dy == 0:
+                continue
+
+            angle_rad = math.atan2(dy, dx)
+            angle_deg = math.degrees(angle_rad)
+
+            angle_norm = (angle_deg + 360.0) % 180.0
+
+            angle_error = abs(angle_norm - 90.0)
+            if angle_error > 45.0:
+                lines_filtered_by_angle += 1
+                continue
+
+            valid_angles.append(angle_norm)
+
+        except Exception:
+            continue
+
+    if log_stuff:
+        logger.debug(f"Total lines: {len(lines)}")
+        logger.debug(f"Lines filtered by angle (>45 deg): {lines_filtered_by_angle}")
+        logger.debug(f"Valid angles for histogram: {len(valid_angles)}")
+
+    if len(valid_angles) == 0:
+        return None, 0
+
+    valid_angles_arr = np.array(valid_angles)
+    hist, bin_edges = np.histogram(valid_angles_arr, bins=36, range=(0, 180))
+
+    peak_bin = int(np.argmax(hist))
+    prominent_angle = float((bin_edges[peak_bin] + bin_edges[peak_bin + 1]) / 2.0)
+
+    count_str = len(valid_angles)
+    msg = f"Prominent angle: {prominent_angle:.2f} deg ({count_str} lines)"
+
+    if log_stuff:
+        logger.debug(msg)
+
+    return prominent_angle, len(valid_angles)

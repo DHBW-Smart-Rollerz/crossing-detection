@@ -2,7 +2,11 @@
 
 import math
 
+import cv2
 import numpy as np
+
+from crossing_detection.utils.helper import normalize_line
+from crossing_detection.utils.tools import is_line_dotted_by_gap_detection
 
 
 def is_right_stop_line_valid(
@@ -394,7 +398,9 @@ def check_stop_line_pair_plausibility(
     return None, None
 
 
-def is_ego_roi_and_distance_valid(clipped_line, crossing_center, image_shape, roi_box):
+def is_ego_roi_and_distance_valid(
+    clipped_line, crossing_center, image_shape, roi_box, valid_dist_to_cc_max=250
+):
     """
     Check if ego line is within ROI bounds and distance.
 
@@ -438,7 +444,7 @@ def is_ego_roi_and_distance_valid(clipped_line, crossing_center, image_shape, ro
         (line_center_x - crossing_center[0]) ** 2
         + (line_center_y - crossing_center[1]) ** 2
     )
-    within_distance = dist_to_center <= 250
+    within_distance = dist_to_center <= valid_dist_to_cc_max
 
     return in_roi_x and in_roi_y and within_distance
 
@@ -537,3 +543,233 @@ def check_line_left_y_pos(stop_line_left, ego_line_long, opp_line_long):
             return False
 
     return True
+
+
+def check_line_by_horizontal_extension(line, image, logger, direction="right"):
+    """
+    Verify a line is a real lane line (not misclassified ego line).
+
+    Extends the line by padding + test length in the specified
+    direction and checks if it remains continuous (solid). Real lane
+    lines fade/break when extended; misclassified lines stay continuous.
+
+    Arguments:
+        line -- Line to check (numpy array shape (1,4))
+        image -- Image to test on
+        logger -- Logger for debug output
+        direction -- "right" or "left" (extends rightmost/leftmost endpoint)
+
+    Returns:
+        Tuple of (is_valid, extended_line)
+        - is_valid: False if line is valid, True if should be rejected
+        - extended_line: The extended line array for visualization
+    """
+    if line is None:
+        return False, None
+
+    try:
+        x1, y1, x2, y2 = line[0]
+
+        m = (y2 - y1) / (x2 - x1) if (x2 - x1) != 0 else 0
+
+        if direction == "right":
+            line_start = (x1, y1) if x1 > x2 else (x2, y2)
+
+            x_padded = line_start[0] + 40.0
+            y_padded = line_start[1] + m * 40.0
+
+            x2_extended = x_padded + 50.0
+            y2_extended = y_padded + m * 50.0
+
+        else:  # direction == "left"
+            line_start = (x1, y1) if x1 < x2 else (x2, y2)
+
+            x_padded = line_start[0] - 40.0
+            y_padded = line_start[1] - m * 40.0
+
+            x2_extended = x_padded - 50.0
+            y2_extended = y_padded - m * 50.0
+
+        extended_line = np.array(
+            [
+                [
+                    x_padded,
+                    y_padded,
+                    x2_extended,
+                    y2_extended,
+                ]
+            ],
+            dtype=np.float32,
+        )
+
+        (
+            _,
+            gaps_count,
+            wr_extended,
+            _,
+        ) = is_line_dotted_by_gap_detection(
+            extended_line,
+            image,
+            box_half_width=22,
+            length_extend=1.2,
+            min_gap_count=2,
+        )
+
+        logger.debug(
+            f"EXTENSION TEST ({direction}): gaps={gaps_count} " f"wr={wr_extended:.1f}%"
+        )
+
+        if gaps_count == 0 and wr_extended > 20.0:
+            logger.debug(
+                f"REJECTING: extended line ({direction}) is "
+                f"continuous (wr={wr_extended:.1f}% > 20%)"
+            )
+            return True, extended_line
+
+        return False, extended_line
+
+    except Exception as e:
+        logger.error(f"Error in check_line_by_horizontal_extension: {e}")
+        return False, None
+
+
+def check_line_by_vertical_extension(line, image, logger, is_right=True):
+    """
+    Verify a stop line by extending from its endpoint.
+
+    For right stop line: extends from the lowest point (max y) downward.
+    For left stop line: extends from the highest point (min y) upward.
+
+    Arguments:
+        line -- Stop line to check (numpy array shape (1,4))
+        image -- Image to test on
+        logger -- Logger for debug output
+        is_right -- True for right stop line, False for left stop line
+
+    Returns:
+        Tuple of (gaps_count, wr_extended, extended_line)
+        - gaps_count: Number of gaps detected
+        - wr_extended: White ratio of extended line
+        - extended_line: The extended line array for visualization
+    """
+    if line is None:
+        return None, None, None
+
+    try:
+        x1, y1, x2, y2 = line[0]
+
+        if is_right:
+            if y1 > y2:
+                x_start, y_start = x1, y1
+                x_other, y_other = x2, y2
+            else:
+                x_start, y_start = x2, y2
+                x_other, y_other = x1, y1
+
+            if (y_start - y_other) != 0:
+                slope = (x_start - x_other) / (y_start - y_other)
+            else:
+                slope = 0.0
+
+            x_padded = x_start + slope * 40.0
+            y_padded = y_start + 40.0
+
+            x2_extended = x_padded + slope * 50.0
+            y2_extended = y_padded + 50.0
+
+        else:
+            if y1 < y2:
+                x_start, y_start = x1, y1
+                x_other, y_other = x2, y2
+            else:
+                x_start, y_start = x2, y2
+                x_other, y_other = x1, y1
+
+            if (y_start - y_other) != 0:
+                slope = (x_start - x_other) / (y_start - y_other)
+            else:
+                slope = 0.0
+
+            x_padded = x_start - slope * 40.0
+            y_padded = y_start - 40.0
+
+            x2_extended = x_padded - slope * 50.0
+            y2_extended = y_padded - 50.0
+
+        extended_line = np.array(
+            [
+                [
+                    x_padded,
+                    y_padded,
+                    x2_extended,
+                    y2_extended,
+                ]
+            ],
+            dtype=np.float32,
+        )
+
+        logger.debug(
+            f"[DEBUG] Stop line {'RIGHT' if is_right else 'LEFT'}: "
+            f"start=({x_start:.1f}, {y_start:.1f}), "
+            f"padded=({x_padded:.1f}, {y_padded:.1f}), "
+            f"extended=({x2_extended:.1f}, {y2_extended:.1f})"
+        )
+
+        (
+            _,
+            gaps_count,
+            wr_extended,
+            _,
+        ) = is_line_dotted_by_gap_detection(
+            extended_line,
+            image,
+            box_half_width=22,
+            length_extend=1.1,
+            min_gap_count=3,
+        )
+
+        stop_type = "RIGHT" if is_right else "LEFT"
+        logger.debug(
+            f"STOP LINE {stop_type} EXTENSION: gaps={gaps_count} "
+            f"wr={wr_extended:.1f}%"
+        )
+
+        return gaps_count, wr_extended, extended_line
+
+    except Exception as e:
+        logger.error(f"Error in check_line_by_vertical_extension: {e}")
+        return None, None, None
+
+
+def is_line_in_quadrant(line, quadrant):
+    """
+    Check if a line is contained within a quadrant polygon.
+
+    A line is considered "in" a quadrant if both endpoints are inside
+    or on the edge of the quadrant polygon.
+
+    Arguments:
+        line -- Line as numpy array [[x1, y1, x2, y2]]
+        quadrant -- Quadrant as list of 4 corner points
+
+    Returns:
+        True if both line endpoints are in the quadrant, False otherwise
+    """
+    if line is None or quadrant is None:
+        return False
+
+    try:
+        nl = normalize_line(line)
+        if nl is None:
+            return False
+
+        x1, y1, x2, y2 = nl[0].astype(int)
+
+        poly = np.array(quadrant, dtype=np.int32)
+
+        d1 = cv2.pointPolygonTest(poly, (int(x1), int(y1)), False)
+        d2 = cv2.pointPolygonTest(poly, (int(x2), int(y2)), False)
+
+        return d1 >= 0 and d2 >= 0
+    except Exception:
+        return False

@@ -78,6 +78,10 @@ class TunableParamSet:
         self.heading_filter_angle_tolerance = get_param(
             "heading_filter_angle_tolerance", 15.0
         )
+        self.default_cc_vertical_pos_relative = get_param(
+            "default_cc_vertical_pos_relative", 0.5
+        )
+        self.ego_valid_dist_to_cc_max = get_param("ego_valid_dist_to_cc_max", 250)
 
         for param_name, param_value in self.__dict__.items():
             logger.info(f"Loaded parameter: {param_name} = {param_value}")
