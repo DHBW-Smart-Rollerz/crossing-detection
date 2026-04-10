@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import sensor_msgs.msg
 import std_msgs.msg
-from smarty_utils.enums import NodeState
+from smarty_utils.enums import CrossingLineType, NodeState
 from smarty_utils.smarty_node import SmartyNode
 from timing import timer
 
@@ -50,6 +50,16 @@ from crossing_detection.utils.tools import (
     perform_canny,
 )
 
+try:
+    from camera_preprocessing.transformation.coordinate_transform import (
+        CoordinateTransform,
+        Unit,
+    )
+
+    COORD_TRANSFORM_AVAILABLE = True
+except ImportError:
+    COORD_TRANSFORM_AVAILABLE = False
+
 # Color constants (RGB tuples - will be converted to BGR via cv2.COLOR_RGB2BGR)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
@@ -65,19 +75,6 @@ PINK = (255, 192, 203)
 VIOLET = (148, 0, 211)
 TURQUOISE = (200, 230, 240)
 GOLD = (255, 215, 0)
-
-
-class LaneType(IntEnum):
-    """Declare types of lines."""
-
-    EGO_SOLID = 20
-    EGO_DOTTED = 21
-    OPP_SOLID = 22
-    OPP_DOTTED = 23
-    RIGHT_SOLID = 24
-    RIGHT_DOTTED = 25
-    LEFT_SOLID = 26
-    LEFT_DOTTED = 27
 
 
 FILTERING_ROI_REL_RLTB = (0.80, 0, 0, 0.815)  # left, right, top, bottom
@@ -186,6 +183,14 @@ class IntersectionDetector(SmartyNode):
 
         self.intersection_aggregator = IntersectionAggregator(max_frames=7)
 
+        if COORD_TRANSFORM_AVAILABLE:
+            try:
+                self.coord_transform = CoordinateTransform(debug=False)
+            except Exception as e:
+                self.coord_transform = None
+        else:
+            self.coord_transform = None
+
     @timer.Timer(name="image_callback", filter_strength=40)
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
@@ -203,9 +208,57 @@ class IntersectionDetector(SmartyNode):
             img_dbg, result_list = self.pipeline(img)
 
             try:
-                msg_out = std_msgs.msg.Float32MultiArray(
-                    data=[float(x) for x in result_list]
-                )
+                msg_payload = []
+                msg_out = None
+                if result_list is not None:
+                    print(f"Pipeline result: {result_list}")
+                    for result in result_list:
+                        code = float(result[0])
+                        p1 = [result[1], result[2]]
+                        p2 = [result[3], result[4]]
+                        conf = float(result[5])
+
+                        if self.coord_transform is not None:
+                            p1_world = self.coord_transform.bird_to_world(p1)
+                            p2_world = self.coord_transform.bird_to_world(p2)
+
+                        msg_payload.extend(
+                            [
+                                float(code),
+                                float(p1_world[0][0]),
+                                float(p1_world[0][1]),
+                                float(p2_world[0][0]),
+                                float(p2_world[0][1]),
+                                float(conf),
+                            ]
+                        )
+
+                    msg_out = std_msgs.msg.Float32MultiArray()
+                    msg_out.data = msg_payload
+
+                    num_lines = len(result_list)
+
+                    msg_out.layout.dim.append(
+                        std_msgs.msg.MultiArrayDimension(
+                            label="lines",
+                            size=num_lines,
+                            stride=num_lines * 6,
+                        )
+                    )
+                    msg_out.layout.dim.append(
+                        std_msgs.msg.MultiArrayDimension(
+                            label="line_data",
+                            size=6,
+                            stride=6,
+                        )
+                    )
+                    msg_out.layout.data_offset = 0
+                else:
+                    msg_out = std_msgs.msg.Float32MultiArray()
+                    msg_out.data = []
+                    msg_out.layout.data_offset = 0
+
+                self.get_logger().debug(f"Publishing result: {msg_out.data}")
                 if self.intersection_aggregator.is_crossing_stable(
                     lookback=self.tunable_params.stability_lookback
                 ):
@@ -1455,7 +1508,7 @@ class IntersectionDetector(SmartyNode):
         def _push_entry(code, line, conf=1.0):
             if line is None:
                 return
-            nl = normalize_lines(line)
+            nl = normalize_line(line)
             if nl is None:
                 return
             x1p, y1p, x2p, y2p = nl[0].astype(float)
@@ -1463,7 +1516,7 @@ class IntersectionDetector(SmartyNode):
                 code_int = int(code)
             except Exception:
                 code_int = int(float(code))
-            result_list.extend(
+            result_list.append(
                 [
                     float(code_int),
                     float(x1p),
@@ -1473,24 +1526,6 @@ class IntersectionDetector(SmartyNode):
                     float(conf),
                 ]
             )
-
-        try:
-            if "ego_line_long" in locals() and ego_line_long is not None:
-                code = (
-                    LaneType.EGO_DOTTED
-                    if ("ego_dotted" in locals() and ego_dotted)
-                    else LaneType.EGO_SOLID
-                )
-                _push_entry(code, ego_line_long, conf=1.0)
-            if "opp_line_long" in locals() and opp_line_long is not None:
-                code = (
-                    LaneType.OPP_DOTTED
-                    if ("opp_dotted" in locals() and opp_dotted)
-                    else LaneType.OPP_SOLID
-                )
-                _push_entry(code, opp_line_long, conf=1.0)
-        except Exception:
-            result_list = []
 
         if "ego_line_long" in locals():
             ego_for_agg = ego_line_long if ego_line_long is not None else None
@@ -1523,6 +1558,57 @@ class IntersectionDetector(SmartyNode):
         )
 
         crossing_type = self.intersection_aggregator.get_crossing_type()
+        try:
+            # Parse crossing type string: "es-od-ln-rn"
+            # e=ego, o=opp, l=left, r=right
+            # s=solid, d=dotted, n=none
+            crossing_type = self.intersection_aggregator.get_crossing_type()
+            parts = crossing_type.split("-")
+
+            if len(parts) == 4:
+                ego_type, opp_type, left_type, right_type = parts
+
+                # Push ego line if valid (es=solid, ed=dotted)
+                if ego_type in ["es", "ed"]:
+                    code = (
+                        CrossingLineType.EGO_DOTTED.value
+                        if ego_type == "ed"
+                        else CrossingLineType.EGO_SOLID.value
+                    )
+                    _push_entry(code, ego_line_long, conf=1.0)
+
+                # Push opp line if valid (os=solid, od=dotted)
+                if opp_type in ["os", "od"]:
+                    code = (
+                        CrossingLineType.OPP_DOTTED.value
+                        if opp_type == "od"
+                        else CrossingLineType.OPP_SOLID.value
+                    )
+                    _push_entry(code, opp_line_long, conf=1.0)
+
+                # Push left stop line if valid (ls=solid, ld=dotted)
+                if left_type in ["ls", "ld"]:
+                    code = (
+                        CrossingLineType.LEFT_DOTTED.value
+                        if left_type == "ld"
+                        else CrossingLineType.LEFT_SOLID.value
+                    )
+                    _push_entry(code, stop_line_left, conf=1.0)
+
+                # Push right stop line if valid (rs=solid, rd=dotted)
+                if right_type in ["rs", "rd"]:
+                    code = (
+                        CrossingLineType.RIGHT_DOTTED.value
+                        if right_type == "rd"
+                        else CrossingLineType.RIGHT_SOLID.value
+                    )
+                    _push_entry(code, stop_line_right, conf=1.0)
+        except Exception as e:
+            self.get_logger().error(f"Error pushing entries: {e}")
+            result_list = []
+
+        self.get_logger().info(f"Result list: {result_list}")
+
         is_stable = self.intersection_aggregator.is_crossing_stable(
             lookback=self.tunable_params.stability_lookback
         )
