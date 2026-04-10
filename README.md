@@ -51,6 +51,9 @@ ros2 launch crossing_detection crossing_detection.launch.py
 # surface pattern area
 ros2 launch crossing_detection surface_pattern_node.launch.py config_file:=$(ros2 pkg prefix crossing_detection)/share/crossing_detection/config/surface_pattern_node.yaml
 
+
+# tuning config
+ros2 launch crossing_detection crossing_detection.launch.py config_file:=$(ros2 pkg prefix crossing_detection)/share/crossing_detection/config/rollout2.yaml
 ```
 
 Die crossing detection braucht "scikit-learn". Also `pip install scikit-learn`.

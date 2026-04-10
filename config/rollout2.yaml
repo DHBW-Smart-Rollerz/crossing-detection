@@ -1,0 +1,83 @@
+crossing_detection_node:
+  ros__parameters:
+    image_subscriber: "/camera/image/bev"
+
+    # Publisher topics
+    debug_image_publisher: "/crossing_detection/debug/image"
+    result_publisher: "/crossing_detection/result"
+
+    # State management - ACTIVE for debugging
+    state: 1 # 0=NONE, 1=IDLE, 2=ACTIVE
+
+    debug: true
+
+    compute_crossing_center: true
+
+    # Distance tolerance for grouping similar lines together
+    fuse_lines_distance_tolerance: 80
+
+    # Minimum white ratio for dotted ego lines (%)
+    min_wr_dotted_ego: 20.0
+
+    # Minimum white ratio for solid ego lines (%)
+    min_wr_solid_ego: 35.0
+
+    # Minimum white ratio for solid ego lines with angle deviation (%)
+    min_wr_solid_ego_angled: 20.0
+
+    # Maximum distance to crossing center for ego line validation (pixels)
+    ego_valid_dist_to_cc_max: 250
+
+    # Clipping parameters for adaptive ego line clipping
+    clip_ego_adaptive_min_rel: 0.5 # Minimum relative clipping (50%)
+    clip_ego_adaptive_max_rel: 0.75 # Maximum relative clipping (75%)
+
+    # Minimum white ratio for opp lines (%)
+    min_wr_opp: 35.0
+
+    # Minimum white ratio for opp lines with angle deviation (%)
+    min_wr_opp_angled: 28.0
+
+    # Clipping parameters for adaptive opp line clipping
+    clip_opp_adaptive_min_rel: 0.1 # Minimum relative clipping (10%)
+    clip_opp_adaptive_max_rel: 0.5 # Maximum relative clipping (50%)
+
+    # LEFT STOP LINE - White ratio thresholds
+    min_wr_stop_left_solid: 30 # For solid lines (%)
+    min_wr_stop_left_dotted: 25 # For dotted lines (%)
+
+    # RIGHT STOP LINE - White ratio thresholds
+    min_wr_stop_right_solid: 30 # For solid lines (%)
+    min_wr_stop_right_dotted: 25 # For dotted lines (%)
+
+    # Minimum thickness for stop lines to be considered valid (pixels)
+    left_stop_line_min_thickness: 18
+    right_stop_line_min_thickness: 18
+
+    # Black pixel percentage threshold for stop line crossing openness check
+    # If crossing area has > this % black pixels, it's considered blocked
+    openness_black_pixel_pct_threshold: 55.0
+
+    # Minimum gap count threshold for dotted line detection
+    min_gap_count_dotted: 3
+
+    # Angle tolerance for rectangle validation in corner detection (degrees)
+    tolerance_angle_cc_rect: 20.0
+
+    # Maximum allowed error for corner positions in rectangle (pixels)
+    allowed_corner_error_cc_rect: 30.0
+
+    # Default vertical position relative to ROI if crossing center not detected
+    default_cc_vertical_pos_relative: 0.5
+
+    # Relative height of black corner triangle in BEV image (0.0 to 1.0)
+    bev_dead_area_corner_height_rel: 0.73
+
+    # Relative width of black corner triangle in BEV image (0.0 to 1.0)
+    bev_dead_area_corner_width_rel: 0.4
+
+    # Angle tolerance for heading angle filtering (degrees)
+    heading_filter_angle_tolerance: 15.0
+
+    # Number of previous frames to look back for stability check
+    stability_lookback: 2
