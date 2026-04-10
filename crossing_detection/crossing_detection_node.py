@@ -195,6 +195,11 @@ class IntersectionDetector(SmartyNode):
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
         if self.get_parameter("state").value != NodeState.ACTIVE.value:
+            self.get_logger().debug("Node is not active. Skipping processing.")
+            msg_out = std_msgs.msg.Float32MultiArray()
+            msg_out.data = []
+            msg_out.layout.data_offset = 0
+            self.result_publisher.publish(msg_out)
             return
 
         try:
