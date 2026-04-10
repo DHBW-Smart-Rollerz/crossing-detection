@@ -701,7 +701,23 @@ class SurfacePatternDetector(SmartyNode):
         if len(valid_boxes) > 0:
             self.draw_cluster_boxes(orig_image, valid_boxes)
 
-        return orig_image, []
+        largest_box = None
+        for box in valid_boxes:
+            if largest_box is None:
+                largest_box = box
+            else:
+                largest_area = cv2.contourArea(largest_box)
+                current_area = cv2.contourArea(box)
+                if current_area > largest_area:
+                    largest_box = box
+
+        print(largest_box)
+
+        top_point_box = None
+        if largest_box is not None:
+            top_point_box = min(largest_box, key=lambda p: p[1])
+            cv2.circle(orig_image, tuple(top_point_box), 5, (255, 0, 255), -1)
+        return (orig_image, [])
 
 
 def main(args=None):
