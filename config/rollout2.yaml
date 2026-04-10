@@ -80,4 +80,4 @@ crossing_detection_node:
     heading_filter_angle_tolerance: 15.0
 
     # Number of previous frames to look back for stability check
-    stability_lookback: 2
+    stability_lookback: 5
