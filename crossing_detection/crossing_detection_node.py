@@ -151,6 +151,11 @@ class IntersectionDetector(SmartyNode):
             },
         )
 
+        self.last_known_ego = None
+        self.last_known_opp = None
+        self.last_known_stop_left = None
+        self.last_known_stop_right = None
+
         self.cv_bridge = cv_bridge.CvBridge()
         try:
             self.compute_crossing_center = self.get_parameter(
@@ -1580,7 +1585,10 @@ class IntersectionDetector(SmartyNode):
                         if ego_type == "ed"
                         else CrossingLineType.EGO_SOLID.value
                     )
-                    _push_entry(code, ego_line_long, conf=1.0)
+                    result_ego = (
+                        clipped_ego if clipped_ego is not None else self.last_known_ego
+                    )
+                    _push_entry(code, result_ego, conf=1.0)
 
                 # Push opp line if valid (os=solid, od=dotted)
                 if opp_type in ["os", "od"]:
@@ -1589,7 +1597,10 @@ class IntersectionDetector(SmartyNode):
                         if opp_type == "od"
                         else CrossingLineType.OPP_SOLID.value
                     )
-                    _push_entry(code, opp_line_long, conf=1.0)
+                    result_opp = (
+                        clipped_opp if clipped_opp is not None else self.last_known_opp
+                    )
+                    _push_entry(code, result_opp, conf=1.0)
 
                 # Push left stop line if valid (ls=solid, ld=dotted)
                 if left_type in ["ls", "ld"]:
@@ -1598,7 +1609,12 @@ class IntersectionDetector(SmartyNode):
                         if left_type == "ld"
                         else CrossingLineType.LEFT_SOLID.value
                     )
-                    _push_entry(code, stop_line_left, conf=1.0)
+                    result_left = (
+                        stop_line_left
+                        if stop_line_left is not None
+                        else self.last_known_stop_left
+                    )
+                    _push_entry(code, result_left, conf=1.0)
 
                 # Push right stop line if valid (rs=solid, rd=dotted)
                 if right_type in ["rs", "rd"]:
@@ -1607,7 +1623,13 @@ class IntersectionDetector(SmartyNode):
                         if right_type == "rd"
                         else CrossingLineType.RIGHT_SOLID.value
                     )
-                    _push_entry(code, stop_line_right, conf=1.0)
+                    result_right = (
+                        stop_line_right
+                        if stop_line_right is not None
+                        else self.last_known_stop_right
+                    )
+                    _push_entry(code, result_right, conf=1.0)
+
         except Exception as e:
             self.get_logger().error(f"Error pushing entries: {e}")
             result_list = []
@@ -1617,6 +1639,22 @@ class IntersectionDetector(SmartyNode):
         is_stable = self.intersection_aggregator.is_crossing_stable(
             lookback=self.tunable_params.stability_lookback
         )
+
+        self.last_known_ego = (
+            clipped_ego if clipped_ego is not None else self.last_known_ego
+        )
+        self.last_known_opp = (
+            clipped_opp if clipped_opp is not None else self.last_known_opp
+        )
+        self.last_known_stop_left = (
+            stop_line_left if stop_line_left is not None else self.last_known_stop_left
+        )
+        self.last_known_stop_right = (
+            stop_line_right
+            if stop_line_right is not None
+            else self.last_known_stop_right
+        )
+
         buffer_levels = self.intersection_aggregator.get_buffer_levels()
         overall_confidence = self.intersection_aggregator.get_overall_confidence()
         stability_scores = self.intersection_aggregator.get_stability_score()
