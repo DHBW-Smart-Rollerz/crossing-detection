@@ -26,6 +26,17 @@ from crossing_detection.utils.tools import (
     fuse_similar_lines,
 )
 
+try:
+    from camera_preprocessing.transformation.coordinate_transform import (
+        CoordinateTransform,
+        Unit,
+    )
+
+    COORD_TRANSFORM_AVAILABLE = True
+except ImportError:
+    COORD_TRANSFORM_AVAILABLE = False
+
+
 # Color constants (RGB tuples - will be converted to BGR via cv2.COLOR_RGB2BGR)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
@@ -56,7 +67,7 @@ class LaneType(IntEnum):
     LEFT_DOTTED = 27
 
 
-FILTERING_ROI_REL_RLTB = (0.75, 0.15, 0, 0.815)  # left, right, top, bottom
+FILTERING_ROI_REL_RLTB = (0.75, 0.25, 0, 0.815)  # left, right, top, bottom
 
 
 lsd = cv2.createLineSegmentDetector(1)
@@ -83,23 +94,11 @@ class SurfacePatternDetector(SmartyNode):
                 "image_subscriber": "/camera/birds_eye",
                 # Publisher topics
                 "debug_image_publisher": "/crossing_detection/debug/image",
-                "result_publisher": "/crossing_detection/result",
+                "result_publisher": "/surface_pattern_detection/result",
                 # Parameters
                 "state": NodeState.INACTIVE.value,
-                "image_path": "resources/img/example.png",
                 "debug": False,
-                "compute_crossing_center": False,
                 # Sharpening parameters
-                "sharpen_enabled": True,
-                "sharpen_strength_top": 1.5,
-                "sharpen_strength_bottom": 1.0,
-                # Distortion enhancement parameters
-                "enhance_distorted_roi_enabled": True,
-                "enhance_distortion_kernel": 5,
-                "enhance_distortion_dilations": 1,
-                # Gap detection debug visualization
-                "debug_line_gap_detection": False,
-                "debug_logging": False,
             },
             subscribed_topics={
                 "image_subscriber": (
@@ -115,72 +114,40 @@ class SurfacePatternDetector(SmartyNode):
         )
         self.tunable_params = TunableParamSet(self)
         self.cv_bridge = cv_bridge.CvBridge()
-        try:
-            self.compute_crossing_center = self.get_parameter(
-                "compute_crossing_center"
-            ).value
-        except Exception:
-            self.compute_crossing_center = True
-
-        try:
-            self.sharpen_enabled = self.get_parameter("sharpen_enabled").value
-            self.sharpen_strength_top = self.get_parameter("sharpen_strength_top").value
-            self.sharpen_strength_bottom = self.get_parameter(
-                "sharpen_strength_bottom"
-            ).value
-        except Exception:
-            # fallback defaults
-            self.sharpen_enabled = True
-            self.sharpen_strength_top = 1.5
-            self.sharpen_strength_bottom = 1.0
-
-        try:
-            self.enhance_distorted_roi_enabled = self.get_parameter(
-                "enhance_distorted_roi_enabled"
-            ).value
-            self.enhance_distortion_kernel = self.get_parameter(
-                "enhance_distortion_kernel"
-            ).value
-            self.enhance_distortion_dilations = self.get_parameter(
-                "enhance_distortion_dilations"
-            ).value
-        except Exception:
-            self.enhance_distorted_roi_enabled = True
-            self.enhance_distortion_kernel = 5
-            self.enhance_distortion_dilations = 1
-
-        try:
-            self.debug_line_gap_detection = self.get_parameter(
-                "debug_line_gap_detection"
-            ).value
-        except Exception:
-            self.debug_line_gap_detection = False
-
-        try:
-            self.debug_logging = self.get_parameter("debug_logging").value
-        except Exception:
-            self.debug_logging = False
-
         # Configure logger level based on debug_logging parameter
         logger = self.get_logger()
-        if self.debug_logging:
+
+        try:
+            self.debug = self.get_parameter("debug").value
+        except Exception:
+            self.debug = False
+
+        if self.debug:
             logger.set_level(rclpy.logging.LoggingSeverity.DEBUG)
         else:
             logger.set_level(rclpy.logging.LoggingSeverity.INFO)
 
         self.debug_visualizer = CrossingDebugVisualizer(node=self)
 
-        self.detected_crossing_center = None
-        self.active_crossing_center = None
-        self.crossing_center_frames = 0
-        self.crossing_center_error = float("inf")
-
         self.intersection_aggregator = IntersectionAggregator(max_frames=7)
+
+        if COORD_TRANSFORM_AVAILABLE:
+            try:
+                self.coord_transform = CoordinateTransform(debug=False)
+            except Exception as e:
+                self.coord_transform = None
+        else:
+            self.coord_transform = None
 
     @timer.Timer(name="image_callback", filter_strength=40)
     def image_callback(self, msg: sensor_msgs.msg.Image):
         """Executed by the ROS2 system whenever a new image is received."""
         if self.get_parameter("state").value != NodeState.ACTIVE.value:
+            self.get_logger().info("Node is not active. Skipping processing.")
+            msg_out = std_msgs.msg.Float32MultiArray()
+            msg_out.data = []
+            msg_out.layout.data_offset = 0
+            self.result_publisher.publish(msg_out)
             return
 
         try:
@@ -194,10 +161,42 @@ class SurfacePatternDetector(SmartyNode):
             img_dbg, result_list = self.pipeline(img)
 
             try:
-                msg_out = std_msgs.msg.Float32MultiArray(
-                    data=[float(x) for x in result_list]
-                )
-                self.result_publisher.publish(msg_out)
+                if len(result_list) == 0:
+                    self.get_logger().debug(
+                        "No results detected, publishing empty message."
+                    )
+                    msg_out = std_msgs.msg.Float32MultiArray()
+                    msg_out.data = []
+                    msg_out.layout.data_offset = 0
+                    self.result_publisher.publish(msg_out)
+                else:
+                    # Create Float32MultiArray message with proper layout
+                    msg_out = std_msgs.msg.Float32MultiArray()
+                    p1 = [result_list[0], result_list[1]]
+                    p2 = [result_list[2], result_list[3]]
+                    print(p1, p2)
+                    p1_world = self.coord_transform.bird_to_world(p1)
+                    p2_world = self.coord_transform.bird_to_world(p2)
+                    msg_out.data = [
+                        float(p1_world[0][0]),
+                        float(p1_world[0][1]),
+                        float(p2_world[0][0]),
+                        float(p2_world[0][1]),
+                    ]
+
+                    # Set layout if we have results
+                    # Layout: one dimension for the point data
+                    msg_out.layout.dim.append(
+                        std_msgs.msg.MultiArrayDimension(
+                            label="data",
+                            size=4,
+                            stride=1,
+                        )
+                    )
+                    self.get_logger().debug(f"Publishing result: {msg_out.data}")
+                    msg_out.layout.data_offset = 0
+                    self.result_publisher.publish(msg_out)
+
             except Exception as e:
                 self.get_logger().error(f"publishing result failed: {e}")
 
@@ -649,7 +648,7 @@ class SurfacePatternDetector(SmartyNode):
             2,
         )
 
-        lines = filter_by_roi(lines, image.shape)
+        lines = filter_by_roi(lines, image.shape, roi=FILTERING_ROI_REL_RLTB)
 
         lines = fuse_similar_lines(lines, angle_tol_deg=8, center_dist_tol=20)
 
@@ -717,7 +716,20 @@ class SurfacePatternDetector(SmartyNode):
         if largest_box is not None:
             top_point_box = min(largest_box, key=lambda p: p[1])
             cv2.circle(orig_image, tuple(top_point_box), 5, (255, 0, 255), -1)
-        return (orig_image, [])
+
+            bottom_point_box = max(largest_box, key=lambda p: p[1])
+            cv2.circle(orig_image, tuple(bottom_point_box), 5, (255, 0, 255), -1)
+
+        result = []
+        if top_point_box is not None:
+            x1 = float(top_point_box[0])
+            y1 = float(top_point_box[1])
+            x2 = float(bottom_point_box[0])
+            y2 = float(bottom_point_box[1])
+
+            result = [x1, y1, x2, y2]
+
+        return (orig_image, result)
 
 
 def main(args=None):

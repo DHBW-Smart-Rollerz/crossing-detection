@@ -94,7 +94,7 @@ def filter_by_angle(
     return vertical, horizontal
 
 
-def filter_by_roi(lines, img_shape):
+def filter_by_roi(lines, img_shape, roi=None):
     """
     Filter lines based on a region of interest (ROI).
 
@@ -108,10 +108,16 @@ def filter_by_roi(lines, img_shape):
     height = img_shape[0]
     width = img_shape[1]
 
-    roi_top = int(height * FILTERING_ROI_REL_RLTB[2])
-    roi_bottom = int(height * FILTERING_ROI_REL_RLTB[3])
-    roi_left = int(width * FILTERING_ROI_REL_RLTB[1])
-    roi_right = int(width * FILTERING_ROI_REL_RLTB[0])
+    if roi is None:
+        roi_top = int(height * FILTERING_ROI_REL_RLTB[2])
+        roi_bottom = int(height * FILTERING_ROI_REL_RLTB[3])
+        roi_left = int(width * FILTERING_ROI_REL_RLTB[1])
+        roi_right = int(width * FILTERING_ROI_REL_RLTB[0])
+    else:
+        roi_top = int(height * roi[2])
+        roi_bottom = int(height * roi[3])
+        roi_left = int(width * roi[1])
+        roi_right = int(width * roi[0])
 
     res = []
     for line in lines:
