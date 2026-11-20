@@ -1,0 +1,34 @@
+surface_pattern_node:
+  ros__parameters:
+    # Subscriber topics
+    image_subscriber: "/camera/birds_eye"
+
+    # Publisher topics
+    debug_image_publisher: "/crossing_detection/debug/image"
+    result_publisher: "/crossing_detection/result"
+
+    # State management - ACTIVE for debugging
+    state: 1 # 0=NONE, 1=IDLE, 2=ACTIVE
+
+    # File paths
+    image_path: "resources/img/example.png"
+
+    # General debug options - ALL ENABLED for debugging
+    debug: true
+    debug_logging: true
+
+    # Compute crossing center from corners
+    compute_crossing_center: true
+
+    # Sharpening parameters (for top and bottom ROI enhancement)
+    sharpen_enabled: true
+    sharpen_strength_top: 1.5
+    sharpen_strength_bottom: 1.0
+
+    # Distortion enhancement parameters (for edge detection improvement)
+    enhance_distorted_roi_enabled: true
+    enhance_distortion_kernel: 5
+    enhance_distortion_dilations: 1
+
+    # Gap detection debug visualization - ENABLED
+    debug_line_gap_detection: false

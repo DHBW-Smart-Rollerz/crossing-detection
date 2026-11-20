@@ -31,6 +31,7 @@ setup(
     entry_points={
         "console_scripts": [
             f"crossing_detection_node = {package_name}.crossing_detection_node:main",
+            f"surface_pattern_node = {package_name}.surface_pattern_node:main",
         ],
     },
 )

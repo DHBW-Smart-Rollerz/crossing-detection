@@ -9,38 +9,26 @@ from launch.substitutions import LaunchConfiguration
 
 
 def generate_launch_description():
-    """
-    Generate the launch description.
+    """Generate the launch description for the crossing_detection node."""
+    package_dir = get_package_share_directory("crossing_detection")
 
-    Returns:
-        LaunchDescription -- The launch description.
-    """
-    debug = LaunchConfiguration("debug")
-    params_file = LaunchConfiguration("params_file")
-
-    return LaunchDescription(
-        [
-            DeclareLaunchArgument(
-                "debug", default_value="False", description="Enable debug mode"
-            ),
-            DeclareLaunchArgument(
-                "params_file",
-                default_value=os.path.join(
-                    get_package_share_directory("crossing_detection"),
-                    "config",
-                    "ros_params.yaml",
-                ),
-                description="Path to the ROS parameters file",
-            ),
-            Node(
-                package="crossing_detection",
-                namespace="",  # Is also the namespace for loading the params
-                executable="crossing_detection_node",
-                name="crossing_detection_node",
-                parameters=[
-                    {"debug": debug},
-                    params_file,
-                ],
-            ),
-        ]
+    # Declare launch argument with default value
+    config_arg = DeclareLaunchArgument(
+        "config_file",
+        default_value=os.path.join(package_dir, "config", "crossing_detection.yaml"),
+        description="Path to the config file for crossing detection",
     )
+
+    config_file = LaunchConfiguration("config_file")
+
+    # Create the crossing detection node
+    crossing_detection_node = Node(
+        package="crossing_detection",
+        executable="crossing_detection_node",
+        name="crossing_detection_node",
+        output="screen",
+        parameters=[config_file],
+        emulate_tty=True,
+    )
+
+    return LaunchDescription([crossing_detection_node])

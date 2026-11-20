@@ -1,0 +1,32 @@
+recalibration_interval: 604800 # Interval in seconds between recalibration (7 days)
+
+# Camera configuration
+focal_length: [2, 2] # Focal length of the camera in mm
+sensor_width_mm: 5.33 # Width of the sensor in mm
+sensor_height_mm:  7.11  # Height of the sensor in mm
+
+# Image configuration
+image_size: [2064, 1544] # Width and height of the image in px (4:3)
+# target_size: [2064, 1544] # Width and height of the image in px (4:3)
+# target_size: [1080, 720] # Width and height of the target image in px (16:9)
+target_size: [800, 640] # Width and height of the target image in px (4:3)
+
+# Internal Camera Calibration Chessboard configuration
+recalibrate: false
+calibration_board:
+  board_size: [6, 6]
+  square_size: 0.05 # Size of the squares in m
+
+# External Camera Calibration configuration
+method: "chessboard"
+position_board:
+  board_size: [8, 6]
+  square_size: 0.05 # Size of the squares in m ?
+  world_points: [
+    [0.62, 0.175, 0], [0.62, 0.125, 0], [0.62, 0.075, 0], [0.62, 0.025, 0], [0.62, -0.025, 0], [0.62, -0.075, 0], [0.62, -0.125, 0], [0.62, -0.175, 0],
+    [0.57, 0.175, 0], [0.57, 0.125, 0], [0.57, 0.075, 0], [0.57, 0.025, 0], [0.57, -0.025, 0], [0.57, -0.075, 0], [0.57, -0.125, 0], [0.57, -0.175, 0],
+    [0.52, 0.175, 0], [0.52, 0.125, 0], [0.52, 0.075, 0], [0.52, 0.025, 0], [0.52, -0.025, 0], [0.52, -0.075, 0], [0.52, -0.125, 0], [0.52, -0.175, 0],
+    [0.47, 0.175, 0], [0.47, 0.125, 0], [0.47, 0.075, 0], [0.47, 0.025, 0], [0.47, -0.025, 0], [0.47, -0.075, 0], [0.47, -0.125, 0], [0.47, -0.175, 0],
+    [0.42, 0.175, 0], [0.42, 0.125, 0], [0.42, 0.075, 0], [0.42, 0.025, 0], [0.42, -0.025, 0], [0.42, -0.075, 0], [0.42, -0.125, 0], [0.42, -0.175, 0],
+    [0.37, 0.175, 0], [0.37, 0.125, 0], [0.37, 0.075, 0], [0.37, 0.025, 0], [0.37, -0.025, 0], [0.37, -0.075, 0], [0.37, -0.125, 0], [0.37, -0.175, 0]
+  ]

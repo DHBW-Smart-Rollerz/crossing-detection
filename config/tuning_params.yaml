@@ -1,0 +1,50 @@
+crossing_detection_node:
+  ros__parameters:
+    image_subscriber: "/camera/birds_eye"
+
+    # Publisher topics
+    debug_image_publisher: "/crossing_detection/debug/image"
+    result_publisher: "/crossing_detection/result"
+
+    # State management - ACTIVE for debugging
+    state: 1 # 0=NONE, 1=IDLE, 2=ACTIVE
+
+    debug: true
+
+    compute_crossing_center: true
+
+    # Ego lane line parameters
+    min_wr_dotted_ego: 20.0
+    min_wr_solid_ego: 35.0
+    min_wr_solid_ego_angled: 20.0
+
+    # Opposite lane line parameters
+    min_wr_opp: 35.0
+    min_wr_opp_angled: 28.0
+
+    # Stop line parameters (left side)
+    min_wr_stop_left_solid: 30
+    min_wr_stop_left_dotted: 25
+
+    # Stop line parameters (right side)
+    min_wr_stop_right_solid: 30
+    min_wr_stop_right_dotted: 25
+
+    min_gap_count_dotted: 3
+
+    # Ego line adaptive clipping
+    clip_ego_adaptive_min_rel: 0.5
+    clip_ego_adaptive_max_rel: 0.75
+
+    # Opposite line adaptive clipping
+    clip_opp_adaptive_min_rel: 0.1
+    clip_opp_adaptive_max_rel: 0.5
+
+    allowed_corner_error_cc_rect: 30.0
+    tolerance_angle_cc_rect: 20.0
+
+    openness_black_pixel_pct_threshold: 55.0
+
+    # Stop line thickness thresholds
+    left_stop_line_min_thickness: 18
+    right_stop_line_min_thickness: 18
